@@ -4,7 +4,7 @@ import crypto from 'node:crypto';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { all, insertRow, one, run } from './db';
+import { all, defaultDbFile, insertRow, one, run } from './db';
 import { HttpError } from './core';
 import { audit } from './audit';
 import { getContext } from './context';
@@ -37,9 +37,9 @@ const MAX_SIZE = 15 * 1024 * 1024;
 
 export function storageRoot(): string {
   if (process.env.UPLOAD_DIR) return process.env.UPLOAD_DIR;
-  const dbFile = process.env.DB_FILE;
+  const dbFile = defaultDbFile();
   if (dbFile === ':memory:') return path.join(os.tmpdir(), 'rentacar-test-uploads');
-  return path.join(dbFile ? path.dirname(dbFile) : path.join(process.cwd(), 'data'), 'uploads');
+  return path.join(path.dirname(dbFile), 'uploads');
 }
 
 export const sha256 = (buf: Buffer | Uint8Array | string) => crypto.createHash('sha256').update(buf).digest('hex');

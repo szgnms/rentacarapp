@@ -307,8 +307,18 @@ type Param = SQLInputValue;
 
 const g = globalThis as unknown as { __rentacarDb?: DatabaseSync };
 
-/** Opens (or reopens) the database. Uses DB_FILE or data/rentacar.db. */
-export function openDb(file = process.env.DB_FILE || path.join(process.cwd(), 'data', 'rentacar.db')): DatabaseSync {
+/**
+ * Veritabanı dosyası: DB_FILE, yoksa data/rentacar.db.
+ * Vercel gibi salt-okunur dosya sistemli sunucusuz ortamlarda yalnızca /tmp yazılabilir (geçici!).
+ */
+export function defaultDbFile(): string {
+  if (process.env.DB_FILE) return process.env.DB_FILE;
+  if (process.env.VERCEL) return path.join('/tmp', 'rentacar', 'rentacar.db');
+  return path.join(process.cwd(), 'data', 'rentacar.db');
+}
+
+/** Opens (or reopens) the database. */
+export function openDb(file = defaultDbFile()): DatabaseSync {
   if (file !== ':memory:') fs.mkdirSync(path.dirname(file), { recursive: true });
   const db = new DatabaseSync(file);
   db.exec('PRAGMA foreign_keys = ON;');

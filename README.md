@@ -55,6 +55,21 @@ Boş veritabanında yalnızca `admin` oluşturulur (şifre `ADMIN_PASSWORD` veya
 | `npm run typecheck` | TypeScript kontrolü |
 | `npm run seed` | Demo verisi |
 
+## Vercel'e dağıtım (demo)
+
+Uygulama Vercel'de çalışır, ancak Vercel'in dosya sistemi salt okunurdur ve yalnızca geçici `/tmp` yazılabilir:
+
+- `VERCEL` ortamında veritabanı ve yüklenen dosyalar `/tmp/rentacar/` altına yazılır ve **boş veritabanına demo verisi otomatik yüklenir** (`DEMO_SEED=0` ile kapatılır).
+- Bu veriler **kalıcı değildir**: her soğuk başlatmada/yeni sunucu örneğinde sıfırlanır, örnekler arasında paylaşılmaz (oturum aniden düşebilir).
+  Vercel kurulumu bu yüzden **yalnızca tanıtım/deneme** içindir.
+- Kalıcı kullanım için diskli bir sunucu kullanın (VPS, Railway/Render/Fly.io kalıcı disk) ve `DB_FILE` ile kalıcı yolu verin;
+  ya da veritabanını Postgres'e, dosyaları nesne depolamaya (S3/Vercel Blob) taşıyın.
+- Vercel proje ayarlarında **Production Branch** olarak uygulama kodunun bulunduğu dalı seçin (veya PR'ı `main`'e birleştirin) ve Node.js 22+ kullanın.
+
+| Ortam değişkeni | Açıklama |
+|---|---|
+| `DEMO_SEED` | `1`: boş veritabanına demo verisi yükle (Vercel'de varsayılan açık), `0`: kapalı |
+
 ## Modüller
 
 ### Rezervasyon (`/booking`, `/reservations`, `/calendar`)
