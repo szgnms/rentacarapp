@@ -1,7 +1,7 @@
 // Fatura (e-Arşiv simülasyonu), iade faturası, cari ekstre, alacak yaşlandırma, acente komisyon ekstresi.
 import crypto from 'node:crypto';
 import { all, getSettings, insertRow, one, run, scalar, tx } from '../db';
-import { HttpError, mustGet, nowLocal, num, parseDate, round2, str, today } from '../core';
+import { HttpError, mapSeq, mustGet, nowLocal, num, parseDate, round2, str, today } from '../core';
 import { rentalFinance } from '../rules';
 import { audit } from '../audit';
 import { sendTemplate } from './notify';
@@ -39,7 +39,7 @@ export interface InvoiceLine {
 
 export type InvoiceRow = Invoice & { customer_name: string; contract_no: string | null };
 
-export function listInvoices(f: { from?: string; to?: string; status?: string; customer_id?: string; rental_id?: string } = {}): InvoiceRow[] {
+export function listInvoices(f: { from?: string; to?: string; status?: string; customer_id?: string; rental_id?: string } = {}): Promise<InvoiceRow[]> {
   const where: string[] = [];
   const params: (string | number)[] = [];
   if (str(f.from)) { where.push('i.issue_date >= ?'); params.push(str(f.from)!); }
@@ -55,67 +55,67 @@ export function listInvoices(f: { from?: string; to?: string; status?: string; c
   );
 }
 
-export function getInvoice(id: number) {
-  const inv = one<InvoiceRow>(
+export async function getInvoice(id: number) {
+  const inv = await one<InvoiceRow>(
     `SELECT i.*, c.first_name || ' ' || c.last_name AS customer_name, r.contract_no FROM invoices i
      JOIN customers c ON c.id = i.customer_id LEFT JOIN rentals r ON r.id = i.rental_id WHERE i.id = ?`, id,
   );
   if (!inv) throw new HttpError(404, 'Fatura bulunamadı');
-  return { ...inv, lines: all<InvoiceLine>('SELECT * FROM invoice_lines WHERE invoice_id = ? ORDER BY id', id), customer: mustGet<Customer>('customers', inv.customer_id) };
+  return { ...inv, lines: await all<InvoiceLine>('SELECT * FROM invoice_lines WHERE invoice_id = ? ORDER BY id', id), customer: await mustGet<Customer>('customers', inv.customer_id) };
 }
 
-function nextInvoiceNo(): string {
-  const prefix = (getSettings().invoice_prefix || 'ARS').toUpperCase().slice(0, 3).padEnd(3, 'X');
+async function nextInvoiceNo(): Promise<string> {
+  const prefix = ((await getSettings()).invoice_prefix || 'ARS').toUpperCase().slice(0, 3).padEnd(3, 'X');
   const year = new Date().getFullYear();
-  const n = scalar<number>("SELECT COUNT(*) FROM invoices WHERE substr(invoice_no, 4, 4) = ?", String(year)) + 1;
+  const n = await scalar<number>("SELECT COUNT(*) FROM invoices WHERE substr(invoice_no, 4, 4) = ?", String(year)) + 1;
   return `${prefix}${year}${String(n).padStart(9, '0')}`;
 }
 
-const invoicedNet = (rentalId: number) =>
-  round2(scalar<number>(`SELECT COALESCE(SUM(CASE type WHEN 'sale' THEN total ELSE -total END),0) FROM invoices WHERE rental_id = ? AND status <> 'cancelled'`, rentalId));
+const invoicedNet = async (rentalId: number) =>
+  round2(await scalar<number>(`SELECT COALESCE(SUM(CASE type WHEN 'sale' THEN total ELSE -total END),0) FROM invoices WHERE rental_id = ? AND status <> 'cancelled'`, rentalId));
 
-function createInvoice(
+async function createInvoice(
   data: { type: 'sale' | 'return'; rental_id: number | null; customer_id: number; related_invoice_id?: number | null; notes?: string | null },
   lines: { description: string; quantity: number; unit_price: number }[],
   user: SessionUser | null,
-): number {
-  const vatRate = num(getSettings().vat_rate, 20);
+): Promise<number> {
+  const vatRate = num((await getSettings()).vat_rate, 20);
   const total = round2(lines.reduce((a, l) => a + l.quantity * l.unit_price, 0));
   if (total <= 0) throw new HttpError(400, 'Fatura tutarı sıfırdan büyük olmalıdır');
   const vat = round2((total * vatRate) / (100 + vatRate));
-  const id = insertRow('invoices', {
-    invoice_no: nextInvoiceNo(), type: data.type, rental_id: data.rental_id, customer_id: data.customer_id, related_invoice_id: data.related_invoice_id ?? null,
+  const id = await insertRow('invoices', {
+    invoice_no: await nextInvoiceNo(), type: data.type, rental_id: data.rental_id, customer_id: data.customer_id, related_invoice_id: data.related_invoice_id ?? null,
     issue_date: today(), subtotal: round2(total - vat), vat_rate: vatRate, vat_amount: vat, total, status: 'issued', notes: data.notes ?? null,
     created_by: user?.id ?? null,
   });
-  for (const l of lines) insertRow('invoice_lines', { invoice_id: id, description: l.description, quantity: l.quantity, unit_price: round2(l.unit_price), amount: round2(l.quantity * l.unit_price) });
-  audit('invoice.issue', 'invoice', id, { type: data.type, total, rental_id: data.rental_id });
+  for (const l of lines) await insertRow('invoice_lines', { invoice_id: id, description: l.description, quantity: l.quantity, unit_price: round2(l.unit_price), amount: round2(l.quantity * l.unit_price) });
+  await audit('invoice.issue', 'invoice', id, { type: data.type, total, rental_id: data.rental_id });
   return id;
 }
 
 /** Sözleşme tutarı ile faturalanmış tutar arasındaki farkı faturalar (fazlaysa satış, eksikse iade faturası). */
 export async function issueInvoiceForRental(rentalId: number, user: SessionUser | null): Promise<Invoice | null> {
-  const id = tx(() => {
-    const r = mustGet<Rental>('rentals', rentalId, 'Kiralama');
+  const id = await tx(async () => {
+    const r = await mustGet<Rental>('rentals', rentalId, 'Kiralama');
     if (r.status === 'draft' || r.status === 'cancelled') throw new HttpError(409, 'Bu sözleşme faturalanamaz');
-    const diff = round2(r.total_amount - invoicedNet(rentalId));
+    const diff = round2(r.total_amount - await invoicedNet(rentalId));
     if (Math.abs(diff) < 0.01) return null;
     if (diff < 0) {
-      const last = one<{ id: number }>("SELECT id FROM invoices WHERE rental_id = ? AND type = 'sale' AND status <> 'cancelled' ORDER BY id DESC", rentalId);
+      const last = await one<{ id: number }>("SELECT id FROM invoices WHERE rental_id = ? AND type = 'sale' AND status <> 'cancelled' ORDER BY id DESC", rentalId);
       return createInvoice(
         { type: 'return', rental_id: rentalId, customer_id: r.customer_id, related_invoice_id: last?.id, notes: 'Fiyat düzeltmesi / ücret iadesi' },
         [{ description: `${r.contract_no} fiyat düzeltmesi`, quantity: 1, unit_price: -diff }],
         user,
       );
     }
-    const first = !one('SELECT 1 FROM invoices WHERE rental_id = ? AND status <> \'cancelled\'', rentalId);
+    const first = !await one('SELECT 1 FROM invoices WHERE rental_id = ? AND status <> \'cancelled\'', rentalId);
     const lines: { description: string; quantity: number; unit_price: number }[] = [];
-    const pending = all<RentalCharge>('SELECT * FROM rental_charges WHERE rental_id = ? AND invoice_id IS NULL ORDER BY id', rentalId);
+    const pending = await all<RentalCharge>('SELECT * FROM rental_charges WHERE rental_id = ? AND invoice_id IS NULL ORDER BY id', rentalId);
     if (first) {
       lines.push({ description: `${r.contract_no} araç kiralama bedeli (${r.days} gün)`, quantity: r.days, unit_price: r.daily_rate });
       if (r.long_term_discount) lines.push({ description: 'Uzun dönem indirimi', quantity: 1, unit_price: -r.long_term_discount });
       if (r.channel_markup) lines.push({ description: 'Kanal fiyat farkı', quantity: 1, unit_price: r.channel_markup });
-      for (const x of all<LineItem>('SELECT * FROM rental_extras WHERE rental_id = ?', rentalId)) lines.push({ description: x.name, quantity: 1, unit_price: x.amount });
+      for (const x of await all<LineItem>('SELECT * FROM rental_extras WHERE rental_id = ?', rentalId)) lines.push({ description: x.name, quantity: 1, unit_price: x.amount });
       if (r.one_way_fee) lines.push({ description: 'Tek yön (one-way) ücreti', quantity: 1, unit_price: r.one_way_fee });
       if (r.young_driver_fee) lines.push({ description: 'Genç sürücü ücreti', quantity: 1, unit_price: r.young_driver_fee });
       if (r.coupon_discount) lines.push({ description: 'Kampanya / kupon indirimi', quantity: 1, unit_price: -r.coupon_discount });
@@ -124,20 +124,20 @@ export async function issueInvoiceForRental(rentalId: number, user: SessionUser 
     for (const c of pending) lines.push({ description: `${text('chargeType', c.type)}${c.description ? ' — ' + c.description : ''}`, quantity: 1, unit_price: c.amount });
     const sum = round2(lines.reduce((a, l) => a + l.quantity * l.unit_price, 0));
     if (Math.abs(sum - diff) >= 0.01) lines.push({ description: 'Fark düzeltmesi', quantity: 1, unit_price: round2(diff - sum) });
-    const invId = createInvoice({ type: 'sale', rental_id: rentalId, customer_id: r.customer_id }, lines, user);
-    if (pending.length) run(`UPDATE rental_charges SET invoice_id = ? WHERE id IN (${pending.map(() => '?').join(',')})`, invId, ...pending.map((c) => c.id));
+    const invId = await createInvoice({ type: 'sale', rental_id: rentalId, customer_id: r.customer_id }, lines, user);
+    if (pending.length) await run(`UPDATE rental_charges SET invoice_id = ? WHERE id IN (${pending.map(() => '?').join(',')})`, invId, ...pending.map((c) => c.id));
     return invId;
   });
   if (!id) return null;
   const { invoicePdf } = await import('../documents');
   const pdf = await invoicePdf(id);
-  run('UPDATE invoices SET pdf_file_id = ? WHERE id = ?', pdf.id, id);
-  const inv = one<Invoice>('SELECT * FROM invoices WHERE id = ?', id)!;
-  const r = one<Rental>('SELECT * FROM rentals WHERE id = ?', rentalId)!;
+  await run('UPDATE invoices SET pdf_file_id = ? WHERE id = ?', pdf.id, id);
+  const inv = (await one<Invoice>('SELECT * FROM invoices WHERE id = ?', id))!;
+  const r = (await one<Rental>('SELECT * FROM rentals WHERE id = ?', rentalId))!;
   // Kapanış sonrası (HGS/ceza) faturaları ayrıca bildirilir; iade faturası iade e-postasında gider.
-  if (r.status === 'closed' || one('SELECT 1 FROM invoices WHERE rental_id = ? AND id < ?', rentalId, id)) {
-    const customer = one<Customer>('SELECT * FROM customers WHERE id = ?', inv.customer_id)!;
-    sendTemplate('invoice_issued', {
+  if (r.status === 'closed' || await one('SELECT 1 FROM invoices WHERE rental_id = ? AND id < ?', rentalId, id)) {
+    const customer = (await one<Customer>('SELECT * FROM customers WHERE id = ?', inv.customer_id))!;
+    await sendTemplate('invoice_issued', {
       customer, entity: 'invoice', entityId: id, attachments: [pdf.id],
       vars: { invoice_no: inv.invoice_no, total: new Intl.NumberFormat('tr-TR', { style: 'currency', currency: 'TRY' }).format(inv.total) },
     });
@@ -146,37 +146,37 @@ export async function issueInvoiceForRental(rentalId: number, user: SessionUser 
 }
 
 /** e-Arşiv gönderimi (GİB özel entegratör entegrasyonu yapılana kadar simülasyon). */
-export function sendInvoice(id: number) {
-  const inv = mustGet<Invoice>('invoices', id, 'Fatura');
+export async function sendInvoice(id: number) {
+  const inv = await mustGet<Invoice>('invoices', id, 'Fatura');
   if (inv.status !== 'issued') throw new HttpError(409, 'Fatura gönderilebilir durumda değil');
-  run("UPDATE invoices SET status = 'sent', e_archive_uuid = ?, sent_at = ? WHERE id = ?", crypto.randomUUID(), nowLocal(), id);
-  audit('invoice.send', 'invoice', id);
+  await run("UPDATE invoices SET status = 'sent', e_archive_uuid = ?, sent_at = ? WHERE id = ?", crypto.randomUUID(), nowLocal(), id);
+  await audit('invoice.send', 'invoice', id);
   return getInvoice(id);
 }
 
-export function cancelInvoice(id: number, reason: unknown) {
-  const inv = mustGet<Invoice>('invoices', id, 'Fatura');
+export async function cancelInvoice(id: number, reason: unknown) {
+  const inv = await mustGet<Invoice>('invoices', id, 'Fatura');
   if (inv.status === 'cancelled') return getInvoice(id);
-  run("UPDATE invoices SET status = 'cancelled', notes = COALESCE(notes || ' · ', '') || ? WHERE id = ?", `İptal: ${str(reason) ?? '-'}`, id);
-  run('UPDATE rental_charges SET invoice_id = NULL WHERE invoice_id = ?', id);
-  audit('invoice.cancel', 'invoice', id, { reason });
+  await run("UPDATE invoices SET status = 'cancelled', notes = COALESCE(notes || ' · ', '') || ? WHERE id = ?", `İptal: ${str(reason) ?? '-'}`, id);
+  await run('UPDATE rental_charges SET invoice_id = NULL WHERE invoice_id = ?', id);
+  await audit('invoice.cancel', 'invoice', id, { reason });
   return getInvoice(id);
 }
 
 /** Manuel iade faturası (ör. hasar affı sonrası). */
 export async function creditNote(invoiceId: number, amount: unknown, reason: unknown, user: SessionUser) {
-  const inv = mustGet<Invoice>('invoices', invoiceId, 'Fatura');
+  const inv = await mustGet<Invoice>('invoices', invoiceId, 'Fatura');
   if (inv.type !== 'sale' || inv.status === 'cancelled') throw new HttpError(409, 'Yalnızca geçerli satış faturasına iade faturası kesilebilir');
   const a = round2(num(amount));
   if (!(a > 0 && a <= inv.total)) throw new HttpError(400, 'İade tutarı geçersiz');
-  const id = createInvoice(
+  const id = await createInvoice(
     { type: 'return', rental_id: inv.rental_id, customer_id: inv.customer_id, related_invoice_id: inv.id, notes: str(reason) },
     [{ description: `${inv.invoice_no} iadesi${str(reason) ? ' — ' + str(reason) : ''}`, quantity: 1, unit_price: a }],
     user,
   );
   const { invoicePdf } = await import('../documents');
   const pdf = await invoicePdf(id);
-  run('UPDATE invoices SET pdf_file_id = ? WHERE id = ?', pdf.id, id);
+  await run('UPDATE invoices SET pdf_file_id = ? WHERE id = ?', pdf.id, id);
   return getInvoice(id);
 }
 
@@ -192,22 +192,22 @@ export interface StatementLine {
   balance: number;
 }
 
-export function customerStatement(customerId: number) {
-  const customer = mustGet<Customer>('customers', customerId, 'Müşteri');
+export async function customerStatement(customerId: number) {
+  const customer = await mustGet<Customer>('customers', customerId, 'Müşteri');
   const lines: Omit<StatementLine, 'balance'>[] = [];
-  for (const r of all<Rental & { plate: string }>(
+  for (const r of await all<Rental & { plate: string }>(
     `SELECT r.*, v.plate FROM rentals r JOIN vehicles v ON v.id = r.vehicle_id WHERE r.customer_id = ? AND r.status NOT IN ('draft','cancelled')`, customerId,
   )) {
     const base = round2(r.total_amount - r.charges_amount);
     lines.push({ date: r.signed_at ?? r.pickup_at, description: `Kira bedeli · ${r.plate} · ${r.days} gün`, ref: r.contract_no, link: `/rentals/${r.id}`, debit: base, credit: 0 });
-    for (const c of all<RentalCharge>('SELECT * FROM rental_charges WHERE rental_id = ?', r.id)) {
+    for (const c of await all<RentalCharge>('SELECT * FROM rental_charges WHERE rental_id = ?', r.id)) {
       lines.push({
         date: c.created_at.replace(' ', 'T').slice(0, 16), description: `${text('chargeType', c.type)}${c.description ? ' — ' + c.description : ''}${c.post_charge ? ' (kapanış sonrası)' : ''}`,
         ref: r.contract_no, link: `/rentals/${r.id}`, debit: c.amount, credit: 0,
       });
     }
   }
-  for (const p of all<{ type: string; method: string; amount: number; paid_at: string; contract_no: string | null; rental_id: number | null; code: string | null; reservation_id: number | null }>(
+  for (const p of await all<{ type: string; method: string; amount: number; paid_at: string; contract_no: string | null; rental_id: number | null; code: string | null; reservation_id: number | null }>(
     `SELECT p.type, p.method, p.amount, p.paid_at, r.contract_no, p.rental_id, res.code, p.reservation_id FROM payments p
      LEFT JOIN rentals r ON r.id = p.rental_id LEFT JOIN reservations res ON res.id = p.reservation_id
      WHERE p.customer_id = ? AND p.type IN ('payment','refund') AND (r.id IS NULL OR r.status NOT IN ('draft','cancelled'))`, customerId,
@@ -223,21 +223,20 @@ export function customerStatement(customerId: number) {
     bal = round2(bal + l.debit - l.credit);
     return { ...l, balance: bal };
   });
-  const deposits = all<{ type: string; amount: number }>(`SELECT type, SUM(amount) amount FROM payments WHERE customer_id = ? AND type IN ('deposit_in','deposit_out') GROUP BY type`, customerId);
+  const deposits = await all<{ type: string; amount: number }>(`SELECT type, SUM(amount) amount FROM payments WHERE customer_id = ? AND type IN ('deposit_in','deposit_out') GROUP BY type`, customerId);
   const held = round2((deposits.find((d) => d.type === 'deposit_in')?.amount ?? 0) - (deposits.find((d) => d.type === 'deposit_out')?.amount ?? 0));
   return { customer, lines: out, balance: bal, deposit_held: held, credit_limit: customer.credit_limit };
 }
 
 // ================= Alacak yaşlandırma =================
 
-export function receivablesAging() {
+export async function receivablesAging() {
   const buckets = ['0-30', '31-60', '61-90', '90+'] as const;
-  const rows = all<Rental & { customer_name: string; phone: string }>(
+  const rows = (await mapSeq(await all<Rental & { customer_name: string; phone: string }>(
     `SELECT r.*, c.first_name || ' ' || c.last_name AS customer_name, c.phone FROM rentals r JOIN customers c ON c.id = r.customer_id
      WHERE r.status IN ('active','returned','closed')`,
-  )
-    .map((r) => {
-      const fin = rentalFinance(r);
+        ), async (r) => {
+      const fin = await rentalFinance(r);
       const ref = r.actual_return_at ?? r.planned_return_at;
       const age = Math.max(0, Math.floor((Date.now() - parseDate(ref)!.getTime()) / 86400000));
       return {
@@ -245,7 +244,7 @@ export function receivablesAging() {
         status: r.status, due_date: ref, age, balance: fin.balance,
         bucket: age <= 30 ? '0-30' : age <= 60 ? '31-60' : age <= 90 ? '61-90' : '90+',
       };
-    })
+    }))
     .filter((x) => x.balance > 0.009 && x.status !== 'active');
   const totals = Object.fromEntries(buckets.map((b) => [b, round2(rows.filter((r) => r.bucket === b).reduce((a, r) => a + r.balance, 0))])) as Record<(typeof buckets)[number], number>;
   return { rows: rows.sort((a, b) => b.age - a.age), totals, total: round2(rows.reduce((a, r) => a + r.balance, 0)) };
@@ -253,7 +252,7 @@ export function receivablesAging() {
 
 // ================= Acente komisyon ekstresi =================
 
-export function agencyStatement(f: { from?: string; to?: string; agency_id?: string }) {
+export async function agencyStatement(f: { from?: string; to?: string; agency_id?: string }) {
   const to = str(f.to) ?? today();
   const from = str(f.from) ?? to.slice(0, 8) + '01';
   const params: (string | number)[] = [from, to + 'T23:59'];
@@ -262,7 +261,7 @@ export function agencyStatement(f: { from?: string; to?: string; agency_id?: str
     extra = ' AND x.agency_id = ?';
     params.push(num(f.agency_id));
   }
-  const rows = all<{ kind: string; id: number; ref: string; agency_id: number; agency_name: string; customer_name: string; pickup_at: string; total: number; commission: number; status: string }>(
+  const rows = await all<{ kind: string; id: number; ref: string; agency_id: number; agency_name: string; customer_name: string; pickup_at: string; total: number; commission: number; status: string }>(
     `SELECT * FROM (
        SELECT 'rental' AS kind, r.id, r.contract_no AS ref, r.agency_id, a.name AS agency_name, c.first_name || ' ' || c.last_name AS customer_name,
               r.pickup_at, r.total_amount AS total, r.agency_commission AS commission, r.status

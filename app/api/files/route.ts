@@ -33,7 +33,7 @@ export const POST = handler(
       throw new HttpError(400, 'Geçersiz meta');
     }
     return created(
-      saveFile({ kind, entity, entityId: toId(form.get('entity_id')), name: file.name, mime: file.type, data: Buffer.from(await file.arrayBuffer()), meta }),
+      await saveFile({ kind, entity, entityId: toId(form.get('entity_id')), name: file.name, mime: file.type, data: Buffer.from(await file.arrayBuffer()), meta }),
     );
   },
   { raw: true },

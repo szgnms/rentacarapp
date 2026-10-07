@@ -15,7 +15,7 @@ const STATUS: Record<string, [string, '' | 'ok' | 'warn' | 'danger' | 'info']> =
 
 export default async function InvoicesPage({ searchParams }: { searchParams: SearchParams }) {
   const [q] = await Promise.all([flat(searchParams), requirePerm('finance.manage')]);
-  const rows = listInvoices(q);
+  const rows = await listInvoices(q);
   const live = rows.filter((r) => r.status !== 'cancelled');
   const sales = live.filter((r) => r.type === 'sale');
   const returns = live.filter((r) => r.type === 'return');

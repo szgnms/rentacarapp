@@ -6,33 +6,33 @@ import type { Body, Branch, Extra, SessionUser, Settings, User } from '../types'
 // ----- Şubeler -----
 export const listBranches = () => all<Branch>('SELECT * FROM branches ORDER BY active DESC, name');
 
-export function saveBranch(id: number | null, b: Body): Branch {
+export async function saveBranch(id: number | null, b: Body): Promise<Branch> {
   required(b, [['name', 'Şube adı']]);
   const data = { name: str(b.name), city: str(b.city), address: str(b.address), phone: str(b.phone), active: b.active === undefined ? 1 : bool(b.active) };
   if (id) {
-    mustGet('branches', id, 'Şube');
-    updateRow('branches', id, data);
-  } else id = insertRow('branches', data);
+    await mustGet('branches', id, 'Şube');
+    await updateRow('branches', id, data);
+  } else id = await insertRow('branches', data);
   return mustGet<Branch>('branches', id);
 }
 
-export function deleteBranch(id: number) {
+export async function deleteBranch(id: number) {
   const used =
-    one('SELECT 1 FROM vehicles WHERE branch_id = ? LIMIT 1', id) ||
-    one('SELECT 1 FROM rentals WHERE pickup_branch_id = ? OR return_branch_id = ? LIMIT 1', id, id) ||
-    one('SELECT 1 FROM reservations WHERE pickup_branch_id = ? OR return_branch_id = ? LIMIT 1', id, id);
+    await one('SELECT 1 FROM vehicles WHERE branch_id = ? LIMIT 1', id) ||
+    await one('SELECT 1 FROM rentals WHERE pickup_branch_id = ? OR return_branch_id = ? LIMIT 1', id, id) ||
+    await one('SELECT 1 FROM reservations WHERE pickup_branch_id = ? OR return_branch_id = ? LIMIT 1', id, id);
   if (used) {
-    run('UPDATE branches SET active = 0 WHERE id = ?', id);
+    await run('UPDATE branches SET active = 0 WHERE id = ?', id);
     return { ok: true, deactivated: true };
   }
-  run('DELETE FROM branches WHERE id = ?', id);
+  await run('DELETE FROM branches WHERE id = ?', id);
   return { ok: true };
 }
 
 // ----- Ek hizmetler -----
 export const listExtras = () => all<Extra>('SELECT * FROM extras ORDER BY active DESC, name');
 
-export function saveExtra(id: number | null, b: Body): Extra {
+export async function saveExtra(id: number | null, b: Body): Promise<Extra> {
   required(b, [['name', 'Ad']]);
   const data = {
     name: str(b.name),
@@ -44,30 +44,30 @@ export function saveExtra(id: number | null, b: Body): Extra {
     active: b.active === undefined ? 1 : bool(b.active),
   };
   if (id) {
-    mustGet('extras', id, 'Ek hizmet');
-    updateRow('extras', id, data);
-  } else id = insertRow('extras', data);
+    await mustGet('extras', id, 'Ek hizmet');
+    await updateRow('extras', id, data);
+  } else id = await insertRow('extras', data);
   return mustGet<Extra>('extras', id);
 }
 
-export function deleteExtra(id: number) {
+export async function deleteExtra(id: number) {
   const used =
-    one('SELECT 1 FROM reservation_extras WHERE extra_id = ? LIMIT 1', id) || one('SELECT 1 FROM rental_extras WHERE extra_id = ? LIMIT 1', id);
+    await one('SELECT 1 FROM reservation_extras WHERE extra_id = ? LIMIT 1', id) || await one('SELECT 1 FROM rental_extras WHERE extra_id = ? LIMIT 1', id);
   if (used) {
-    run('UPDATE extras SET active = 0 WHERE id = ?', id);
+    await run('UPDATE extras SET active = 0 WHERE id = ?', id);
     return { ok: true, deactivated: true };
   }
-  run('DELETE FROM extras WHERE id = ?', id);
+  await run('DELETE FROM extras WHERE id = ?', id);
   return { ok: true };
 }
 
 // ----- Ayarlar -----
-export function updateSettings(b: Body): Settings {
+export async function updateSettings(b: Body): Promise<Settings> {
   for (const key of Object.keys(DEFAULT_SETTINGS)) {
     // Boş gönderilen şifre alanı mevcut değeri korur.
     if (key === 'smtp_pass' && !str(b[key])) continue;
     if (b[key] !== undefined) {
-      run('INSERT INTO settings(key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value', key, String(b[key] ?? ''));
+      await run('INSERT INTO settings(key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value', key, String(b[key] ?? ''));
     }
   }
   return getSettings();
@@ -78,11 +78,11 @@ const USER_COLS = 'id, username, full_name, role, branch_id, email, phone, disco
 const ROLES = ['admin', 'branch_manager', 'reservation', 'field', 'accounting', 'fleet', 'staff'] as const;
 export const listUsers = () => all<User>(`SELECT ${USER_COLS} FROM users ORDER BY username`);
 
-export function createUser(b: Body): User {
+export async function createUser(b: Body): Promise<User> {
   required(b, [['username', 'Kullanıcı adı'], ['full_name', 'Ad soyad'], ['password', 'Şifre']]);
   if (String(b.password).length < 6) throw new HttpError(400, 'Şifre en az 6 karakter olmalıdır');
-  if (one('SELECT 1 FROM users WHERE username = ?', str(b.username))) throw new HttpError(409, 'Bu kullanıcı adı zaten kullanılıyor');
-  const id = insertRow('users', {
+  if (await one('SELECT 1 FROM users WHERE username = ?', str(b.username))) throw new HttpError(409, 'Bu kullanıcı adı zaten kullanılıyor');
+  const id = await insertRow('users', {
     username: str(b.username),
     full_name: str(b.full_name),
     role: oneOf(b.role, ROLES, 'Rol', 'staff'),
@@ -93,11 +93,11 @@ export function createUser(b: Body): User {
     password_hash: hashPassword(String(b.password)),
     active: b.active === undefined ? 1 : bool(b.active),
   });
-  return one<User>(`SELECT ${USER_COLS} FROM users WHERE id = ?`, id)!;
+  return (await one<User>(`SELECT ${USER_COLS} FROM users WHERE id = ?`, id))!;
 }
 
-export function updateUser(id: number, b: Body, actor: SessionUser, actorToken: string): User {
-  mustGet('users', id, 'Kullanıcı');
+export async function updateUser(id: number, b: Body, actor: SessionUser, actorToken: string): Promise<User> {
+  await mustGet('users', id, 'Kullanıcı');
   const data: Record<string, string | number | undefined> = {
     full_name: str(b.full_name) ?? undefined,
     role: b.role ? oneOf(b.role, ROLES, 'Rol') : undefined,
@@ -113,10 +113,10 @@ export function updateUser(id: number, b: Body, actor: SessionUser, actorToken: 
   if (str(b.password)) {
     if (String(b.password).length < 6) throw new HttpError(400, 'Şifre en az 6 karakter olmalıdır');
     data.password_hash = hashPassword(String(b.password));
-    run('DELETE FROM sessions WHERE user_id = ? AND token <> ?', id, actorToken);
+    await run('DELETE FROM sessions WHERE user_id = ? AND token <> ?', id, actorToken);
   }
-  updateRow('users', id, data);
-  if (branchChange !== undefined) run('UPDATE users SET branch_id = ? WHERE id = ?', branchChange, id);
-  if (data.active === 0) run('DELETE FROM sessions WHERE user_id = ?', id);
-  return one<User>(`SELECT ${USER_COLS} FROM users WHERE id = ?`, id)!;
+  await updateRow('users', id, data);
+  if (branchChange !== undefined) await run('UPDATE users SET branch_id = ? WHERE id = ?', branchChange, id);
+  if (data.active === 0) await run('DELETE FROM sessions WHERE user_id = ?', id);
+  return (await one<User>(`SELECT ${USER_COLS} FROM users WHERE id = ?`, id))!;
 }

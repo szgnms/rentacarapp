@@ -10,8 +10,8 @@ export const metadata: Metadata = { title: 'Kira sözleşmesi' };
 
 export default async function ContractPage({ params }: { params: IdParams }) {
   const { id } = await params;
-  const r = orNotFound(() => getRental(Number(id)));
-  const s = getSettings();
+  const r = await orNotFound(() => getRental(Number(id)));
+  const s = await getSettings();
   const c = r.customer;
   const v = r.vehicle;
   return (

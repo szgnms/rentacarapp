@@ -19,8 +19,8 @@ const STATUS: Record<string, [string, '' | 'ok' | 'warn' | 'danger' | 'info' | '
 
 export default async function FinesPage({ searchParams }: { searchParams: SearchParams }) {
   const [q] = await Promise.all([flat(searchParams), requirePerm('fines.manage')]);
-  const rows = listFines(q);
-  const rentals = rentalOptions();
+  const rows = await listFines(q);
+  const rentals = await rentalOptions();
   const open = rows.filter((f) => ['new', 'matched', 'transferred', 'objected'].includes(f.status));
   return (
     <>

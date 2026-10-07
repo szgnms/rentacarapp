@@ -17,7 +17,7 @@ export const APPROVAL_LABELS: Record<string, string> = {
   charge_waiver: 'Ücret affı',
 };
 
-export function listApprovals(status?: string): ApprovalRow[] {
+export function listApprovals(status?: string): Promise<ApprovalRow[]> {
   return all<ApprovalRow>(
     `SELECT a.*, u.full_name AS requested_by_name, d.full_name AS decided_by_name,
             CASE a.entity WHEN 'reservation' THEN (SELECT code FROM reservations WHERE id = a.entity_id)
@@ -29,36 +29,36 @@ export function listApprovals(status?: string): ApprovalRow[] {
   );
 }
 
-export const pendingApprovalCount = () => (one<{ n: number }>("SELECT COUNT(*) n FROM approvals WHERE status = 'pending'")?.n ?? 0);
+export const pendingApprovalCount = async () => ((await one<{ n: number }>("SELECT COUNT(*) n FROM approvals WHERE status = 'pending'"))?.n ?? 0);
 
-export function decideApproval(id: number, approve: boolean, note: unknown, user: SessionUser) {
-  const a = one<Approval>('SELECT * FROM approvals WHERE id = ?', id);
+export async function decideApproval(id: number, approve: boolean, note: unknown, user: SessionUser) {
+  const a = await one<Approval>('SELECT * FROM approvals WHERE id = ?', id);
   if (!a) throw new HttpError(404, 'Onay talebi bulunamadı');
   if (a.status !== 'pending') throw new HttpError(409, 'Talep zaten sonuçlanmış');
   if (a.requested_by === user.id && user.role !== 'admin') throw new HttpError(403, 'Kendi talebinizi onaylayamazsınız');
-  tx(() => {
-    run('UPDATE approvals SET status = ?, decided_by = ?, decided_at = ?, decision_note = ? WHERE id = ?',
+  await tx(async () => {
+    await run('UPDATE approvals SET status = ?, decided_by = ?, decided_at = ?, decision_note = ? WHERE id = ?',
       approve ? 'approved' : 'rejected', user.id, nowLocal(), str(note), id);
     const payload = a.payload ? (JSON.parse(a.payload) as Record<string, string | number | null>) : {};
     switch (a.type) {
       case 'discount':
-        applyDiscountDecision(a.entity_id, approve);
+        await applyDiscountDecision(a.entity_id, approve);
         break;
       case 'deposit_refund':
-        if (approve) insertPayment({ ...payload, created_by: payload.created_by ?? user.id });
+        if (approve) await insertPayment({ ...payload, created_by: payload.created_by ?? user.id });
         break;
       case 'charge_waiver':
-        if (approve) applyChargeWaiver(Number(payload.charge_id));
+        if (approve) await applyChargeWaiver(Number(payload.charge_id));
         break;
       case 'damage_waiver':
         if (approve) {
-          const charge = one<{ id: number }>('SELECT id FROM rental_charges WHERE damage_id = ?', a.entity_id);
-          if (charge) applyChargeWaiver(charge.id);
-          else run('UPDATE damages SET waived = 1, customer_charge = 0 WHERE id = ?', a.entity_id);
+          const charge = await one<{ id: number }>('SELECT id FROM rental_charges WHERE damage_id = ?', a.entity_id);
+          if (charge) await applyChargeWaiver(charge.id);
+          else await run('UPDATE damages SET waived = 1, customer_charge = 0 WHERE id = ?', a.entity_id);
         }
         break;
     }
-    audit(`approval.${approve ? 'approve' : 'reject'}`, a.entity, a.entity_id, { approval_id: id, type: a.type, amount: a.amount, note });
+    await audit(`approval.${approve ? 'approve' : 'reject'}`, a.entity, a.entity_id, { approval_id: id, type: a.type, amount: a.amount, note });
   });
   return one<Approval>('SELECT * FROM approvals WHERE id = ?', id);
 }

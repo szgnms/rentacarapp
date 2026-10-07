@@ -12,8 +12,8 @@ export const metadata: Metadata = { title: 'Cari ekstre' };
 
 export default async function StatementPage({ params }: { params: IdParams }) {
   const [{ id }] = await Promise.all([params, requireUser()]);
-  const s = orNotFound(() => customerStatement(Number(id)));
-  const company = getSettings().company_name;
+  const s = await orNotFound(() => customerStatement(Number(id)));
+  const company = (await getSettings()).company_name;
   return (
     <>
       <PageHead

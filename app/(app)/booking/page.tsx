@@ -13,11 +13,11 @@ export const metadata: Metadata = { title: 'Yeni kiralama / rezervasyon' };
 
 export default async function BookingPage({ searchParams }: { searchParams: SearchParams }) {
   const q = await flat(searchParams);
-  const editing = q.reservation_id ? orNotFound(() => getReservation(Number(q.reservation_id))) : null;
+  const editing = q.reservation_id ? await orNotFound(() => getReservation(Number(q.reservation_id))) : null;
   const customerId = editing?.customer_id ?? (q.customer_id ? Number(q.customer_id) : null);
   // İstemciye yalnızca müşteri kartı + uygunluk uyarıları gönderilir.
   const customer = customerId
-    ? (({ rentals: _r, reservations: _s, payments: _p, balance: _b, ...c }) => c)(orNotFound(() => getCustomer(customerId)))
+    ? (({ rentals: _r, reservations: _s, payments: _p, balance: _b, ...c }) => c)(await orNotFound(() => getCustomer(customerId)))
     : null;
   return (
     <>
@@ -27,12 +27,12 @@ export default async function BookingPage({ searchParams }: { searchParams: Sear
       />
       <BookingForm
         key={editing?.id ?? q.mode ?? 'new'}
-        branches={listBranches()}
-        extras={listExtras()}
+        branches={await listBranches()}
+        extras={await listExtras()}
         categories={CATEGORIES}
         transmissions={TRANSMISSIONS}
-        channels={listChannels()}
-        agencies={listAgencies()}
+        channels={await listChannels()}
+        agencies={await listAgencies()}
         editing={editing}
         initialMode={q.mode === 'rental' ? 'rental' : 'reservation'}
         initialVehicleId={q.vehicle_id ? Number(q.vehicle_id) : null}

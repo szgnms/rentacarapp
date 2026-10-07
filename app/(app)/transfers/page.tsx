@@ -17,9 +17,9 @@ const STATUS: Record<string, [string, '' | 'ok' | 'violet' | 'warn']> = { reques
 
 export default async function TransfersPage({ searchParams }: { searchParams: SearchParams }) {
   const [q, user] = await Promise.all([flat(searchParams), requireUser()]);
-  const rows = listTransfers(q);
+  const rows = await listTransfers(q);
   const fleet = can(user, 'fleet.write');
-  const branches = listBranches().filter((b) => b.active).map((b) => [b.id, b.name] as [number, string]);
+  const branches = (await listBranches()).filter((b) => b.active).map((b) => [b.id, b.name] as [number, string]);
   return (
     <>
       <PageHead
@@ -32,7 +32,7 @@ export default async function TransfersPage({ searchParams }: { searchParams: Se
             className="primary"
             success="Transfer emri oluşturuldu"
             fields={[
-              { name: 'vehicle_id', label: 'Araç', type: 'select', options: vehicleOptions().map((v) => [v.id, v.label] as [number, string]), required: true, span: 12 },
+              { name: 'vehicle_id', label: 'Araç', type: 'select', options: (await vehicleOptions()).map((v) => [v.id, v.label] as [number, string]), required: true, span: 12 },
               { name: 'to_branch_id', label: 'Hedef şube', type: 'select', options: branches, required: true },
               { name: 'planned_at', label: 'Planlanan çıkış', type: 'datetime-local' },
               { name: 'driver', label: 'Şoför' },

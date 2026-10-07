@@ -22,8 +22,8 @@ export default async function FinancePage({ searchParams }: { searchParams: Sear
   );
 }
 
-function Aging() {
-  const a = receivablesAging();
+async function Aging() {
+  const a = await receivablesAging();
   return (
     <>
       <div className="grid grid-4 mb">
@@ -49,14 +49,14 @@ function Aging() {
   );
 }
 
-function Agencies({ q }: { q: Record<string, string> }) {
-  const s = agencyStatement(q);
+async function Agencies({ q }: { q: Record<string, string> }) {
+  const s = await agencyStatement(q);
   return (
     <>
       <Filters
         defaults={{ from: s.from, to: s.to }}
         fields={[
-          { name: 'agency_id', type: 'select', empty: 'Tüm acenteler', options: listAgencies().map((a) => [a.id, a.name] as [number, string]) },
+          { name: 'agency_id', type: 'select', empty: 'Tüm acenteler', options: (await listAgencies()).map((a) => [a.id, a.name] as [number, string]) },
           { name: 'from', type: 'date', title: 'Başlangıç' },
           { name: 'to', type: 'date', title: 'Bitiş' },
         ]}

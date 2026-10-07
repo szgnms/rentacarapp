@@ -15,7 +15,7 @@ const MONTHS = ['Oca', 'Şub', 'Mar', 'Nis', 'May', 'Haz', 'Tem', 'Ağu', 'Eyl',
 
 export default async function DashboardPage({ searchParams }: { searchParams: SearchParams }) {
   const [user, q] = await Promise.all([requireUser(), flat(searchParams)]);
-  const d = dashboard(scopedBranch(user));
+  const d = await dashboard(scopedBranch(user));
   return (
     <>
       <PageHead

@@ -8,6 +8,6 @@ export const dynamic = 'force-dynamic';
 
 export default async function PortalPage({ params }: { params: Promise<{ token: string }> }) {
   const { token } = await params;
-  const view = orNotFound(() => getPortal(token));
+  const view = await orNotFound(() => getPortal(token));
   return <PortalView token={token} initial={view} />;
 }

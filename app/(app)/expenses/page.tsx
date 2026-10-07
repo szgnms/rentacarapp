@@ -13,8 +13,8 @@ export const metadata: Metadata = { title: 'Masraflar' };
 export default async function ExpensesPage({ searchParams }: { searchParams: SearchParams }) {
   const [q, user] = await Promise.all([flat(searchParams), requireUser()]);
   const defaults = { from: todayStr().slice(0, 8) + '01', to: todayStr() };
-  const rows = listExpenses({ ...defaults, ...q });
-  const vehicles = vehicleOptions();
+  const rows = await listExpenses({ ...defaults, ...q });
+  const vehicles = await vehicleOptions();
   const total = rows.reduce((a, x) => a + x.amount, 0);
   return (
     <>

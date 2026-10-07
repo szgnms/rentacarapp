@@ -30,7 +30,7 @@ const TPL_FIELDS: FieldSpec[] = [
 export default async function NotificationsPage({ searchParams }: { searchParams: SearchParams }) {
   const [q] = await Promise.all([flat(searchParams), requirePerm('notifications.manage')]);
   const tab = q.tab || 'log';
-  const s = getSettings();
+  const s = await getSettings();
   return (
     <>
       <PageHead
@@ -48,8 +48,8 @@ export default async function NotificationsPage({ searchParams }: { searchParams
   );
 }
 
-function Log({ q }: { q: Record<string, string> }) {
-  const rows = listMessages(q);
+async function Log({ q }: { q: Record<string, string> }) {
+  const rows = await listMessages(q);
   return (
     <>
       <Filters
@@ -78,8 +78,8 @@ function Log({ q }: { q: Record<string, string> }) {
   );
 }
 
-function Templates() {
-  const rows = listNotificationTemplates();
+async function Templates() {
+  const rows = await listNotificationTemplates();
   return (
     <Card actions={<FormButton title="Yeni şablon" url="/api/notification-templates" fields={TPL_FIELDS} defaults={{ active: true, language: 'tr', channel: 'email' }} className="sm primary" wide>+ Şablon</FormButton>}>
       <Table cols={['Tetikleyici', 'Kanal', 'Dil', 'Konu / metin', 'Tür', 'Durum', '']} count={rows.length}>

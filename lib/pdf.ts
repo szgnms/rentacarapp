@@ -83,7 +83,7 @@ export class PdfWriter {
     return out;
   }
 
-  text(text: string, o: { size?: number; bold?: boolean; color?: ReturnType<typeof rgb>; indent?: number; gap?: number; align?: 'left' | 'right' | 'center' } = {}) {
+  text(text: string, o: { size?: number; bold?: boolean; color?: Awaited<ReturnType<typeof rgb>>; indent?: number; gap?: number; align?: 'left' | 'right' | 'center' } = {}) {
     const size = o.size ?? 9.5;
     const font = o.bold ? this.bold : this.font;
     const width = this.width - (o.indent ?? 0);
@@ -183,7 +183,7 @@ export class PdfWriter {
   }
 
   async image(data: Buffer, mime: string, maxW: number, maxH: number): Promise<PDFImage> {
-    return mime === 'image/png' ? this.doc.embedPng(data) : this.doc.embedJpg(data);
+    return mime === 'image/png' ? await this.doc.embedPng(data) : await this.doc.embedJpg(data);
   }
 
   /** Görsel ızgarası (fotoğraflar). */

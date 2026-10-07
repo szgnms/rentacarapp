@@ -25,9 +25,9 @@ function Expiry({ date }: { date: string | null }) {
 
 export default async function VehiclePage({ params, searchParams }: { params: IdParams; searchParams: SearchParams }) {
   const [{ id }, q, user] = await Promise.all([params, flat(searchParams), requireUser()]);
-  const v = orNotFound(() => getVehicle(Number(id)));
-  const branches = listBranches();
-  const vehicles = vehicleOptions();
+  const v = await orNotFound(() => getVehicle(Number(id)));
+  const branches = await listBranches();
+  const vehicles = await vehicleOptions();
   const tab = q.tab || 'rentals';
   const tabs: [string, string][] = [
     ['rentals', `Kiralamalar (${v.rentals.length})`],

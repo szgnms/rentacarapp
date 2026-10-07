@@ -18,10 +18,10 @@ const STATUS: Record<string, [string, '' | 'ok' | 'warn' | 'danger' | 'info' | '
 
 export default async function TollsPage({ searchParams }: { searchParams: SearchParams }) {
   const [q] = await Promise.all([flat(searchParams), requirePerm('tolls.manage')]);
-  const rows = listTolls(q);
-  const sum = tollFineSummary();
+  const rows = await listTolls(q);
+  const sum = await tollFineSummary();
   const unmatched = rows.filter((r) => r.status === 'unmatched');
-  const rentals = unmatched.length ? rentalOptions() : [];
+  const rentals = unmatched.length ? await rentalOptions() : [];
   const cols: Col[] = ['Geçiş', 'Plaka / etiket', 'Gişe / yer', ['Tutar', 'num'], 'Sözleşme', 'Durum', ''];
   return (
     <>

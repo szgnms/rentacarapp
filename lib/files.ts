@@ -1,10 +1,10 @@
 // Değiştirilemez dosya deposu: her dosya SHA-256 özeti, yükleyen, zaman ve meta veriyle kaydedilir.
 // Dosyalar silinmez; yalnızca "geçersiz" işaretlenebilir (WORM yaklaşımı — hukuki delil değeri için).
+// Depo: BLOB_READ_WRITE_TOKEN tanımlıysa Vercel Blob (özel/private erişim), yoksa yerel disk (DATA_DIR/uploads).
 import crypto from 'node:crypto';
 import fs from 'node:fs';
-import os from 'node:os';
 import path from 'node:path';
-import { all, defaultDbFile, insertRow, one, run } from './db';
+import { all, dataDir, insertRow, one, run } from './db';
 import { HttpError } from './core';
 import { audit } from './audit';
 import { getContext } from './context';
@@ -36,10 +36,36 @@ const ALLOWED_MIME: Record<string, string> = {
 const MAX_SIZE = 15 * 1024 * 1024;
 
 export function storageRoot(): string {
-  if (process.env.UPLOAD_DIR) return process.env.UPLOAD_DIR;
-  const dbFile = defaultDbFile();
-  if (dbFile === ':memory:') return path.join(os.tmpdir(), 'rentacar-test-uploads');
-  return path.join(path.dirname(dbFile), 'uploads');
+  return process.env.UPLOAD_DIR || path.join(dataDir(), 'uploads');
+}
+
+/** Blob kayıtları `blob:` önekiyle saklanır; böylece iki depo türü aynı tabloda ayırt edilir. */
+const BLOB = 'blob:';
+const useBlob = () => !!process.env.BLOB_READ_WRITE_TOKEN;
+/** Kişisel veri içerdiğinden varsayılan `private`; depo public oluşturulduysa BLOB_ACCESS=public. */
+const blobAccess = (): 'private' | 'public' => (process.env.BLOB_ACCESS === 'public' ? 'public' : 'private');
+
+async function storeBytes(rel: string, data: Buffer, mime: string): Promise<string> {
+  if (useBlob()) {
+    const { put } = await import('@vercel/blob');
+    const key = `rentacar/${rel.split(path.sep).join('/')}`;
+    await put(key, data, { access: blobAccess(), contentType: mime, addRandomSuffix: false, allowOverwrite: false });
+    return BLOB + key;
+  }
+  const abs = path.join(storageRoot(), rel);
+  fs.mkdirSync(path.dirname(abs), { recursive: true });
+  fs.writeFileSync(abs, data, { flag: 'wx' });
+  return rel;
+}
+
+async function loadBytes(stored: string): Promise<Buffer | null> {
+  if (stored.startsWith(BLOB)) {
+    const { get } = await import('@vercel/blob');
+    const r = await get(stored.slice(BLOB.length), { access: blobAccess(), useCache: false });
+    return r ? Buffer.from(await new Response(r.stream).arrayBuffer()) : null;
+  }
+  const abs = path.join(storageRoot(), stored);
+  return fs.existsSync(abs) ? fs.readFileSync(abs) : null;
 }
 
 export const sha256 = (buf: Buffer | Uint8Array | string) => crypto.createHash('sha256').update(buf).digest('hex');
@@ -54,7 +80,7 @@ export interface SaveFileInput {
   meta?: Record<string, unknown>;
 }
 
-export function saveFile(input: SaveFileInput): StoredFile {
+export async function saveFile(input: SaveFileInput): Promise<StoredFile> {
   const ext = ALLOWED_MIME[input.mime];
   if (!ext) throw new HttpError(415, `Desteklenmeyen dosya türü: ${input.mime}`);
   if (!input.data.length) throw new HttpError(400, 'Dosya boş');
@@ -62,53 +88,50 @@ export function saveFile(input: SaveFileInput): StoredFile {
   const hash = sha256(input.data);
   const d = new Date();
   const rel = path.join(String(d.getFullYear()), String(d.getMonth() + 1).padStart(2, '0'), `${hash.slice(0, 16)}-${crypto.randomBytes(4).toString('hex')}.${ext}`);
-  const abs = path.join(storageRoot(), rel);
-  fs.mkdirSync(path.dirname(abs), { recursive: true });
-  fs.writeFileSync(abs, input.data, { flag: 'wx' });
+  const stored = await storeBytes(rel, input.data, input.mime);
   const ctx = getContext();
   const meta = { ...input.meta, uploaded_at: d.toISOString(), ip: ctx.ip, device: ctx.userAgent };
-  const id = insertRow('files', {
+  const id = await insertRow('files', {
     kind: input.kind,
     entity: input.entity,
     entity_id: input.entityId,
     original_name: input.name ?? null,
     mime: input.mime,
     size: input.data.length,
-    path: rel,
+    path: stored,
     sha256: hash,
     meta: JSON.stringify(meta),
     uploaded_by: ctx.user?.id ?? null,
   });
-  audit('file.upload', input.entity, input.entityId, { file_id: id, kind: input.kind, sha256: hash, ...input.meta });
+  await audit('file.upload', input.entity, input.entityId, { file_id: id, kind: input.kind, sha256: hash, ...input.meta });
   return getFile(id);
 }
 
-export function getFile(id: number): StoredFile {
-  const f = one<StoredFile>('SELECT * FROM files WHERE id = ?', id);
+export async function getFile(id: number): Promise<StoredFile> {
+  const f = await one<StoredFile>('SELECT * FROM files WHERE id = ?', id);
   if (!f) throw new HttpError(404, 'Dosya bulunamadı');
   return f;
 }
 
 /** Dosya içeriğini okur ve bütünlüğünü (hash) doğrular. */
-export function readFile(id: number): { file: StoredFile; data: Buffer; intact: boolean } {
-  const file = getFile(id);
-  const abs = path.join(storageRoot(), file.path);
-  if (!fs.existsSync(abs)) throw new HttpError(410, 'Dosya depoda bulunamadı');
-  const data = fs.readFileSync(abs);
+export async function readFile(id: number): Promise<{ file: StoredFile; data: Buffer; intact: boolean }> {
+  const file = await getFile(id);
+  const data = await loadBytes(file.path);
+  if (!data) throw new HttpError(410, 'Dosya depoda bulunamadı');
   return { file, data, intact: sha256(data) === file.sha256 };
 }
 
-export function listFiles(entity: string, entityId: number, kind?: string): StoredFile[] {
+export async function listFiles(entity: string, entityId: number, kind?: string): Promise<StoredFile[]> {
   return kind
-    ? all<StoredFile>('SELECT * FROM files WHERE entity = ? AND entity_id = ? AND kind = ? AND voided_at IS NULL ORDER BY id', entity, entityId, kind)
-    : all<StoredFile>('SELECT * FROM files WHERE entity = ? AND entity_id = ? AND voided_at IS NULL ORDER BY id', entity, entityId);
+    ? await all<StoredFile>('SELECT * FROM files WHERE entity = ? AND entity_id = ? AND kind = ? AND voided_at IS NULL ORDER BY id', entity, entityId, kind)
+    : await all<StoredFile>('SELECT * FROM files WHERE entity = ? AND entity_id = ? AND voided_at IS NULL ORDER BY id', entity, entityId);
 }
 
-export function voidFile(id: number, reason: string) {
-  const f = getFile(id);
+export async function voidFile(id: number, reason: string) {
+  const f = await getFile(id);
   if (f.voided_at) return f;
-  run("UPDATE files SET voided_at = datetime('now','localtime') WHERE id = ?", id);
-  audit('file.void', f.entity, f.entity_id, { file_id: id, reason });
+  await run("UPDATE files SET voided_at = app_now_text() WHERE id = ?", id);
+  await audit('file.void', f.entity, f.entity_id, { file_id: id, reason });
   return getFile(id);
 }
 

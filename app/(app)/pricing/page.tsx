@@ -16,8 +16,8 @@ const CATS = CATEGORIES.map((c) => [c, c] as [string, string]);
 
 export default async function PricingPage({ searchParams }: { searchParams: SearchParams }) {
   const [q, user] = await Promise.all([flat(searchParams), requireUser()]);
-  const p = pricingData();
-  const s = getSettings();
+  const p = await pricingData();
+  const s = await getSettings();
   const edit = can(user, 'pricing.manage');
   const tab = q.tab || 'plans';
   const seasons = p.seasons.map((x) => [x.id, x.name] as [number, string]);

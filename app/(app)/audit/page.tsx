@@ -13,7 +13,7 @@ const ENTITIES = ['rental', 'reservation', 'customer', 'vehicle', 'payment', 'in
 
 export default async function AuditPage({ searchParams }: { searchParams: SearchParams }) {
   const [q] = await Promise.all([flat(searchParams), requirePerm('audit.view')]);
-  const rows = listAudit({ ...q, limit: 1000 });
+  const rows = await listAudit({ ...q, limit: 1000 });
   return (
     <>
       <PageHead title="Denetim izi (audit log)" sub="Kim, ne zaman, hangi IP/cihazdan, hangi kayıtta ne yaptı — kişisel veri erişimleri (pii.*) dahil. Kayıtlar değiştirilemez." />
@@ -22,7 +22,7 @@ export default async function AuditPage({ searchParams }: { searchParams: Search
           { name: 'action', type: 'search', placeholder: 'İşlem ara (ör. pii, rental.activate, payment)…' },
           { name: 'entity', type: 'select', empty: 'Tüm varlıklar', options: ENTITIES },
           { name: 'entity_id', type: 'search', placeholder: 'Kayıt no' },
-          { name: 'user_id', type: 'select', empty: 'Tüm kullanıcılar', options: listUsers().map((u) => [u.id, u.full_name] as [number, string]) },
+          { name: 'user_id', type: 'select', empty: 'Tüm kullanıcılar', options: (await listUsers()).map((u) => [u.id, u.full_name] as [number, string]) },
         ]}
       />
       <Card>

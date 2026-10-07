@@ -14,7 +14,7 @@ export const metadata: Metadata = { title: 'Bakım & Hasar' };
 export default async function MaintenancePage({ searchParams }: { searchParams: SearchParams }) {
   const [q, user] = await Promise.all([flat(searchParams), requireUser()]);
   const isM = (q.tab || 'maintenance') === 'maintenance';
-  const vehicles = vehicleOptions();
+  const vehicles = await vehicleOptions();
   const admin = user.role === 'admin';
   return (
     <>
@@ -36,8 +36,8 @@ export default async function MaintenancePage({ searchParams }: { searchParams: 
       />
       <Card>
         {isM ? (
-          (() => {
-            const rows = listMaintenance(q);
+          await (async () => {
+            const rows = await listMaintenance(q);
             return (
               <Table cols={['Araç', 'Tarih', 'Tip', 'Açıklama', 'Servis', ['Km', 'num'], ['Maliyet', 'num'], 'Durum', '']} count={rows.length}>
                 {rows.map((m) => (
@@ -65,8 +65,8 @@ export default async function MaintenancePage({ searchParams }: { searchParams: 
             );
           })()
         ) : (
-          (() => {
-            const rows = listDamages(q);
+          await (async () => {
+            const rows = await listDamages(q);
             return (
               <Table cols={['Araç', 'Tarih', 'Konum', 'Açıklama', 'Önem', 'Sözleşme', ['Onarım', 'num'], ['Müşteriye', 'num'], 'Durum', '']} count={rows.length}>
                 {rows.map((x) => (

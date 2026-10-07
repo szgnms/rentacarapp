@@ -18,13 +18,13 @@ export default async function FieldPage({ searchParams }: { searchParams: Search
   const [q, user] = await Promise.all([flat(searchParams), requireUser()]);
   const day = q.date || todayStr();
   const operate = can(user, 'rentals.operate');
-  const pickups = listReservations({ from: day, to: day }, user)
+  const pickups = (await listReservations({ from: day, to: day }, user))
     .filter((r) => ['pending', 'confirmed'].includes(r.status))
     .sort((a, b) => a.pickup_at.localeCompare(b.pickup_at));
-  const drafts = listRentals({ status: 'draft' }, user);
-  const active = listRentals({ status: 'active' }, user);
+  const drafts = await listRentals({ status: 'draft' }, user);
+  const active = await listRentals({ status: 'active' }, user);
   const returns = active.filter((r) => r.planned_return_at.slice(0, 10) <= day).sort((a, b) => a.planned_return_at.localeCompare(b.planned_return_at));
-  const tasks = listTasks({ status: 'open_all', date: day }, user);
+  const tasks = await listTasks({ status: 'open_all', date: day }, user);
   return (
     <>
       <PageHead

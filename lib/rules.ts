@@ -1,6 +1,6 @@
 // İş kuralları: gün/fiyat hesabı, müsaitlik, müşteri uygunluğu, finans ve iade hesabı.
 import { all, getSettings, one, run, scalar } from './db';
-import { HttpError, fmtDateTime, num, nowLocal, normDateTime, parseDate, round2, today, yearsBetween } from './core';
+import { filterSeq, fmtDateTime, HttpError, normDateTime, nowLocal, num, parseDate, round2, today, yearsBetween } from './core';
 import type {
   ChargeType, Conflict, Customer, Extra, Finance, LineItem, Quote, Rental, RentalFinance, Severity, Vehicle,
 } from './types';
@@ -65,7 +65,7 @@ export interface RatePlan {
 }
 
 /** Grup + alış tarihi + kanal için en özel fiyat planı (sezon > genel, kanala özel > tüm kanallar). */
-export function findRatePlan(category: string, pickupDate: string, channel?: string | null): (RatePlan & { season_name: string | null }) | undefined {
+export function findRatePlan(category: string, pickupDate: string, channel?: string | null): Promise<(RatePlan & { season_name: string | null }) | undefined> {
   return one(
     `SELECT rp.*, s.name AS season_name FROM rate_plans rp LEFT JOIN seasons s ON s.id = rp.season_id
      WHERE rp.active = 1 AND rp.category = ? AND (rp.channel IS NULL OR rp.channel = ?)
@@ -76,9 +76,9 @@ export function findRatePlan(category: string, pickupDate: string, channel?: str
 }
 
 /** Grubun liste fiyatı (fiyat planı yoksa): gruptaki aktif araçların en düşük günlük fiyatı. */
-function categoryListRate(category: string): { daily_rate: number; deposit_amount: number } {
+async function categoryListRate(category: string): Promise<{ daily_rate: number; deposit_amount: number }> {
   return (
-    one<{ daily_rate: number; deposit_amount: number }>(
+    await one<{ daily_rate: number; deposit_amount: number }>(
       `SELECT MIN(daily_rate) AS daily_rate, MAX(deposit_amount) AS deposit_amount FROM vehicles
        WHERE category = ? AND status NOT IN ('sold','for_sale','out_of_service')`,
       category,
@@ -102,8 +102,8 @@ export interface Coupon {
   active: number;
 }
 
-export function validateCoupon(code: string, ctx: { days: number; pickup_at: string; category: string | null }): Coupon {
-  const c = one<Coupon>('SELECT * FROM coupons WHERE UPPER(code) = UPPER(?)', code.trim());
+export async function validateCoupon(code: string, ctx: { days: number; pickup_at: string; category: string | null }): Promise<Coupon> {
+  const c = await one<Coupon>('SELECT * FROM coupons WHERE UPPER(code) = UPPER(?)', code.trim());
   if (!c || !c.active) throw new HttpError(400, 'Kupon kodu geçersiz');
   const t = today();
   if (c.valid_from && t < c.valid_from) throw new HttpError(400, 'Kupon henüz geçerli değil');
@@ -128,12 +128,12 @@ export interface DepositRule {
 }
 
 /** Segment/yaş/ehliyet yaşı kurallarına göre depozito; araç depozitosundan düşük olamaz. */
-export function depositFor(category: string | null, base: number, customer: Customer | null | undefined, at: string): { amount: number; rule: string | null } {
+export async function depositFor(category: string | null, base: number, customer: Customer | null | undefined, at: string): Promise<{ amount: number; rule: string | null }> {
   const age = customer?.birth_date ? yearsBetween(customer.birth_date, at) : null;
   const lic = customer?.license_date ? yearsBetween(customer.license_date, at) : null;
   let amount = base;
   let rule: string | null = null;
-  for (const r of all<DepositRule>('SELECT * FROM deposit_rules')) {
+  for (const r of await all<DepositRule>('SELECT * FROM deposit_rules')) {
     if (r.category && r.category !== category) continue;
     if (r.driver_age_under !== null && !(age !== null && age < r.driver_age_under)) continue;
     if (r.license_years_under !== null && !(lic !== null && lic < r.license_years_under)) continue;
@@ -162,22 +162,22 @@ export interface QuoteInput {
   customer?: Customer | null;
 }
 
-export function calcQuote(p: QuoteInput): Quote {
-  const s = getSettings();
+export async function calcQuote(p: QuoteInput): Promise<Quote> {
+  const s = await getSettings();
   const category = p.category || p.vehicle?.category || null;
   if (!category && !p.vehicle) throw new HttpError(400, 'Araç veya araç grubu seçilmelidir');
   const days = calcDays(p.pickup_at, p.return_at, s.grace_hours);
   const pickupDate = p.pickup_at.slice(0, 10);
-  const list = p.vehicle ?? categoryListRate(category!);
+  const list = p.vehicle ?? await categoryListRate(category!);
 
   // 1) Günlük fiyat: elle > fiyat planı (sezon/kanal/gün bandı) > liste fiyatı + uzun dönem indirimi
   let rateSource: Quote['rate_source'] = 'list';
   let dailyRate = num(list.daily_rate);
-  let plan: ReturnType<typeof findRatePlan>;
+  let plan: Awaited<ReturnType<typeof findRatePlan>>;
   if (p.daily_rate !== undefined && p.daily_rate !== null && p.daily_rate !== '') {
     dailyRate = num(p.daily_rate);
     rateSource = 'manual';
-  } else if (category && (plan = findRatePlan(category, pickupDate, p.channel))) {
+  } else if (category && (plan = await findRatePlan(category, pickupDate, p.channel))) {
     dailyRate = plan[bandFor(days)];
     rateSource = 'plan';
   }
@@ -187,7 +187,7 @@ export function calcQuote(p: QuoteInput): Quote {
   const longTerm = round2((base * pct) / 100);
 
   // 2) Kanal fiyat farkı (kanala özel plan kullanılmadıysa)
-  const channel = p.channel ? one<{ markup_pct: number }>('SELECT markup_pct FROM channels WHERE code = ? AND active = 1', p.channel) : undefined;
+  const channel = p.channel ? await one<{ markup_pct: number }>('SELECT markup_pct FROM channels WHERE code = ? AND active = 1', p.channel) : undefined;
   const markupPct = rateSource !== 'manual' && channel && !(plan?.channel) ? channel.markup_pct : 0;
   const markup = round2(((base - longTerm) * markupPct) / 100);
 
@@ -196,7 +196,7 @@ export function calcQuote(p: QuoteInput): Quote {
   let unlimitedKm = false;
   for (const item of p.extras || []) {
     const qty = Math.max(1, Math.floor(num(item.quantity, 1)));
-    const extra = one<Extra>('SELECT * FROM extras WHERE id = ?', num(item.extra_id));
+    const extra = await one<Extra>('SELECT * FROM extras WHERE id = ?', num(item.extra_id));
     if (!extra) throw new HttpError(400, 'Ek hizmet bulunamadı');
     if (extra.code === 'unlimited_km') unlimitedKm = true;
     let unit = extra.price_type === 'daily' ? extra.price * days : extra.price;
@@ -215,13 +215,13 @@ export function calcQuote(p: QuoteInput): Quote {
   let couponDiscount = 0;
   const rentalPart = base - longTerm + markup;
   if (p.coupon_code && String(p.coupon_code).trim()) {
-    coupon = validateCoupon(String(p.coupon_code), { days, pickup_at: p.pickup_at, category });
+    coupon = await validateCoupon(String(p.coupon_code), { days, pickup_at: p.pickup_at, category });
     couponDiscount = round2(coupon.type === 'percent' ? (rentalPart * coupon.value) / 100 : Math.min(coupon.value, rentalPart));
   }
   const discount = round2(Math.max(0, num(p.discount)));
   const total = round2(rentalPart + extrasAmount + oneWay + youngFee - couponDiscount - discount);
   if (total < 0) throw new HttpError(400, 'İndirim toplam tutardan büyük olamaz');
-  const deposit = depositFor(category, num(list.deposit_amount), p.customer, p.pickup_at);
+  const deposit = await depositFor(category, num(list.deposit_amount), p.customer, p.pickup_at);
 
   return {
     days,
@@ -264,14 +264,14 @@ const STATUS_TEXT: Record<string, string> = {
 };
 
 /** Aracın verilen aralıkta çakışan kayıtlarını döndürür (boş dizi = müsait). */
-export function findConflicts(vehicleId: number, from: string, to: string, opts: ConflictOptions = {}): Conflict[] {
+export async function findConflicts(vehicleId: number, from: string, to: string, opts: ConflictOptions = {}): Promise<Conflict[]> {
   const { excludeReservationId = 0, excludeRentalId = 0 } = opts;
-  const vehicle = one<Vehicle>('SELECT * FROM vehicles WHERE id = ?', vehicleId);
+  const vehicle = await one<Vehicle>('SELECT * FROM vehicles WHERE id = ?', vehicleId);
   if (!vehicle) throw new HttpError(404, 'Araç bulunamadı');
   const conflicts: Conflict[] = [];
   if (BLOCKING_STATUS.includes(vehicle.status)) conflicts.push({ type: 'status', message: STATUS_TEXT[vehicle.status] });
 
-  for (const r of all<{ id: number; code: string; pickup_at: string; return_at: string }>(
+  for (const r of await all<{ id: number; code: string; pickup_at: string; return_at: string }>(
     `SELECT id, code, pickup_at, return_at FROM reservations
      WHERE vehicle_id = ? AND status IN ('pending','confirmed') AND id <> ? AND pickup_at < ? AND return_at > ?`,
     vehicleId, excludeReservationId, to, from,
@@ -280,14 +280,14 @@ export function findConflicts(vehicleId: number, from: string, to: string, opts:
   // Gecikmiş (dönüşü geçmiş ama iade alınmamış) sözleşme aracı en az 24 saat daha dolu sayılır.
   const now = nowLocal();
   const overdueUntil = fmtDateTime(new Date(Date.now() + 24 * 3600000));
-  for (const r of all<{ id: number; contract_no: string; planned_return_at: string }>(
+  for (const r of await all<{ id: number; contract_no: string; planned_return_at: string }>(
     `SELECT id, contract_no, planned_return_at FROM rentals
      WHERE vehicle_id = ? AND status IN ('draft','active') AND id <> ? AND pickup_at < ?
        AND (CASE WHEN planned_return_at < ? THEN ? ELSE planned_return_at END) > ?`,
     vehicleId, excludeRentalId, to, now, overdueUntil, from,
   )) conflicts.push({ type: 'rental', id: r.id, message: `Sözleşme ${r.contract_no} (dönüş ${r.planned_return_at}${r.planned_return_at < now ? ' — gecikmiş, iade alınmadı' : ''})` });
 
-  const maint = all<{ id: number; start_date: string; end_date: string | null }>(
+  const maint = await all<{ id: number; start_date: string; end_date: string | null }>(
     `SELECT id, start_date, end_date FROM maintenance
      WHERE vehicle_id = ? AND status IN ('scheduled','in_progress')
        AND start_date || 'T00:00' < ?
@@ -300,7 +300,7 @@ export function findConflicts(vehicleId: number, from: string, to: string, opts:
   for (const m of maint) conflicts.push({ type: 'maintenance', id: m.id, message: `Bakım (${m.start_date}${m.end_date ? ' → ' + m.end_date : ''})` });
   if (vehicle.status === 'maintenance' && maint.length === 0) conflicts.push({ type: 'status', message: 'Araç serviste' });
 
-  const transfer = one<{ id: number }>(
+  const transfer = await one<{ id: number }>(
     `SELECT id FROM vehicle_transfers WHERE vehicle_id = ? AND status IN ('requested','in_transit')
        AND COALESCE(planned_at, created_at) < ?`, vehicleId, to,
   );
@@ -308,8 +308,8 @@ export function findConflicts(vehicleId: number, from: string, to: string, opts:
   return conflicts;
 }
 
-export function assertAvailable(vehicleId: number, from: string, to: string, opts?: ConflictOptions) {
-  const c = findConflicts(vehicleId, from, to, opts);
+export async function assertAvailable(vehicleId: number, from: string, to: string, opts?: ConflictOptions) {
+  const c = await findConflicts(vehicleId, from, to, opts);
   if (c.length) throw new HttpError(409, 'Araç seçilen tarihlerde müsait değil', c);
 }
 
@@ -317,10 +317,10 @@ export function assertAvailable(vehicleId: number, from: string, to: string, opt
  * Grup bazlı müsaitlik (overbooking kontrolü): gruptaki müsait araç sayısı −
  * aynı dönemde araç atanmamış (grup) rezervasyonlar.
  */
-export function groupAvailability(category: string, from: string, to: string, opts: ConflictOptions = {}) {
-  const vehicles = all<{ id: number }>(`SELECT id FROM vehicles WHERE category = ? AND status NOT IN ('sold','for_sale','out_of_service')`, category);
-  const free = vehicles.filter((v) => findConflicts(v.id, from, to, opts).length === 0).length;
-  const unassigned = scalar<number>(
+export async function groupAvailability(category: string, from: string, to: string, opts: ConflictOptions = {}) {
+  const vehicles = await all<{ id: number }>(`SELECT id FROM vehicles WHERE category = ? AND status NOT IN ('sold','for_sale','out_of_service')`, category);
+  const free = (await filterSeq(vehicles, async (v) => (await findConflicts(v.id, from, to, opts)).length === 0)).length;
+  const unassigned = await scalar<number>(
     `SELECT COUNT(*) FROM reservations WHERE vehicle_id IS NULL AND category = ? AND status IN ('pending','confirmed')
        AND id <> ? AND pickup_at < ? AND return_at > ?`,
     category, opts.excludeReservationId ?? 0, to, from,
@@ -330,9 +330,9 @@ export function groupAvailability(category: string, from: string, to: string, op
 
 // ---------- Müşteri uygunluğu ----------
 
-export function customerIssues(customer: Customer | undefined, atDate: string, { strict = false } = {}): string[] {
+export async function customerIssues(customer: Customer | undefined, atDate: string, { strict = false } = {}): Promise<string[]> {
   if (!customer) return ['Müşteri bulunamadı'];
-  const s = getSettings();
+  const s = await getSettings();
   const errors: string[] = [];
   if (customer.anonymized_at) errors.push('Müşteri kaydı anonimleştirilmiş');
   if (customer.blacklisted) errors.push(`Müşteri kara listede${customer.blacklist_reason ? ': ' + customer.blacklist_reason : ''}`);
@@ -358,26 +358,26 @@ export function customerWarnings(customer: Customer, openBalance = 0): string[] 
   return w;
 }
 
-export function assertCustomerOk(customerId: unknown, atDate: string, opts?: { strict?: boolean }): Customer {
-  const customer = one<Customer>('SELECT * FROM customers WHERE id = ?', num(customerId));
+export async function assertCustomerOk(customerId: unknown, atDate: string, opts?: { strict?: boolean }): Promise<Customer> {
+  const customer = await one<Customer>('SELECT * FROM customers WHERE id = ?', num(customerId));
   if (!customer) throw new HttpError(404, 'Müşteri bulunamadı');
-  const issues = customerIssues(customer, atDate, opts);
+  const issues = await customerIssues(customer, atDate, opts);
   if (issues.length) throw new HttpError(422, issues.join('; '), issues);
   return customer;
 }
 
 // ---------- Finans ----------
 
-export function paymentTotals(by: 'rental_id' | 'reservation_id' | 'customer_id', id: number): Finance {
+export async function paymentTotals(by: 'rental_id' | 'reservation_id' | 'customer_id', id: number): Promise<Finance> {
   const t = { payment: 0, refund: 0, deposit_in: 0, deposit_out: 0 };
-  for (const r of all<{ type: keyof typeof t; total: number }>(
+  for (const r of await all<{ type: keyof typeof t; total: number }>(
     `SELECT type, COALESCE(SUM(amount),0) AS total FROM payments WHERE ${by} = ? GROUP BY type`, id,
   )) t[r.type] = round2(r.total);
   return { ...t, paid: round2(t.payment - t.refund), deposit_held: round2(t.deposit_in - t.deposit_out) };
 }
 
-export function rentalFinance(rental: Pick<Rental, 'id' | 'total_amount'>): RentalFinance {
-  const t = paymentTotals('rental_id', rental.id);
+export async function rentalFinance(rental: Pick<Rental, 'id' | 'total_amount'>): Promise<RentalFinance> {
+  const t = await paymentTotals('rental_id', rental.id);
   return { ...t, total: rental.total_amount, balance: round2(rental.total_amount - t.paid) };
 }
 
@@ -387,18 +387,18 @@ type Priced = Pick<Rental, 'base_amount' | 'long_term_discount' | 'extras_amount
 export const subtotal = (r: Priced) =>
   r.base_amount - r.long_term_discount + r.channel_markup + r.extras_amount + r.one_way_fee + r.young_driver_fee - r.coupon_discount - r.discount;
 
-export function recalcRental(rentalId: number) {
-  const r = one<Rental>('SELECT * FROM rentals WHERE id = ?', rentalId);
+export async function recalcRental(rentalId: number) {
+  const r = await one<Rental>('SELECT * FROM rentals WHERE id = ?', rentalId);
   if (!r) return;
-  const c = chargesSum(rentalId);
-  run('UPDATE rentals SET charges_amount = ?, total_amount = ? WHERE id = ?', round2(c), round2(subtotal(r) + c), rentalId);
+  const c = await chargesSum(rentalId);
+  await run('UPDATE rentals SET charges_amount = ?, total_amount = ? WHERE id = ?', round2(c), round2(subtotal(r) + c), rentalId);
 }
 
 // ---------- İade (check-in) hesabı ----------
 
 /** Ayarlardaki "Ad:ücret" satırlarından ekipman listesi. */
-export function equipmentItems(): { name: string; fee: number }[] {
-  return getSettings()
+export async function equipmentItems(): Promise<{ name: string; fee: number }[]> {
+  return (await getSettings())
     .equipment_items.split('\n')
     .map((l) => l.trim())
     .filter(Boolean)
@@ -453,8 +453,8 @@ export interface CheckinCalc {
 
 const truthy = (v: unknown) => v === true || v === 'true' || v === 'on' || v === 1 || v === '1';
 
-export function calcCheckin(rental: Rental, vehicle: Vehicle, input: CheckinInput): CheckinCalc {
-  const s = getSettings();
+export async function calcCheckin(rental: Rental, vehicle: Vehicle, input: CheckinInput): Promise<CheckinCalc> {
+  const s = await getSettings();
   const actualReturn = normDateTime(input.actual_return_at || nowLocal(), 'İade tarihi');
   if (actualReturn < rental.pickup_at) throw new HttpError(400, 'İade tarihi teslim tarihinden önce olamaz');
   const endKm = Math.floor(num(input.end_km, NaN));
@@ -488,7 +488,7 @@ export function calcCheckin(rental: Rental, vehicle: Vehicle, input: CheckinInpu
 
   // Km aşımı (sınırsız km ek hizmeti yoksa)
   const driven = endKm - rental.start_km;
-  const unlimited = !!one(`SELECT 1 FROM rental_extras re JOIN extras e ON e.id = re.extra_id WHERE re.rental_id = ? AND e.code = 'unlimited_km'`, rental.id);
+  const unlimited = !!await one(`SELECT 1 FROM rental_extras re JOIN extras e ON e.id = re.extra_id WHERE re.rental_id = ? AND e.code = 'unlimited_km'`, rental.id);
   if (vehicle.km_limit_per_day > 0 && !unlimited && !truthy(input.waive_km)) {
     const allowed = vehicle.km_limit_per_day * Math.max(actualDays, rental.days);
     const over = driven - allowed;
@@ -523,7 +523,7 @@ export function calcCheckin(rental: Rental, vehicle: Vehicle, input: CheckinInpu
 
   // Kayıp ekipman
   const missing = Array.isArray(input.missing_equipment) ? (input.missing_equipment as unknown[]).map(String) : [];
-  for (const item of equipmentItems()) {
+  for (const item of await equipmentItems()) {
     if (missing.includes(item.name) && item.fee > 0) charges.push({ type: 'missing_equipment', description: `Kayıp ekipman: ${item.name}`, amount: item.fee });
   }
 
@@ -557,8 +557,8 @@ export function calcCheckin(rental: Rental, vehicle: Vehicle, input: CheckinInpu
   }
 
   const chargesTotal = round2(charges.reduce((a, c) => a + c.amount, 0));
-  const newTotal = round2(subtotal(rental) + chargesSum(rental.id) + chargesTotal);
-  const fin = paymentTotals('rental_id', rental.id);
+  const newTotal = round2(subtotal(rental) + await chargesSum(rental.id) + chargesTotal);
+  const fin = await paymentTotals('rental_id', rental.id);
   return {
     actual_return_at: actualReturn,
     end_km: endKm,

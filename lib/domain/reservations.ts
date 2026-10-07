@@ -1,8 +1,6 @@
 import crypto from 'node:crypto';
 import { all, getSettings, insertRow, one, run, tx, updateRow } from '../db';
-import {
-  HttpError, fmtDateTime, makeCode, mustGet, normDateTime, nowLocal, num, oneOf, optId, parseDate, required, round2, str, today,
-} from '../core';
+import { filterSeq, fmtDateTime, HttpError, makeCode, mapSeq, mustGet, normDateTime, nowLocal, num, oneOf, optId, parseDate, required, round2, str, today } from '../core';
 import {
   CATEGORIES, assertAvailable, assertCustomerOk, calcQuote, findConflicts, groupAvailability, parseExtras, paymentTotals, subtotal,
 } from '../rules';
@@ -16,9 +14,9 @@ export const METHODS = ['cash', 'credit_card', 'bank_transfer', 'pos', 'payment_
 export const newToken = () => crypto.randomBytes(18).toString('base64url');
 
 // ---------- Fiyat teklifi ----------
-export function quote(b: Body): Quote {
-  const vehicle = num(b.vehicle_id) ? mustGet<Vehicle>('vehicles', num(b.vehicle_id), 'Araç') : null;
-  const customer = num(b.customer_id) ? one<Customer>('SELECT * FROM customers WHERE id = ?', num(b.customer_id)) : null;
+export async function quote(b: Body): Promise<Quote> {
+  const vehicle = num(b.vehicle_id) ? await mustGet<Vehicle>('vehicles', num(b.vehicle_id), 'Araç') : null;
+  const customer = num(b.customer_id) ? await one<Customer>('SELECT * FROM customers WHERE id = ?', num(b.customer_id)) : null;
   return calcQuote({
     vehicle,
     category: str(b.category) ?? vehicle?.category,
@@ -47,7 +45,7 @@ export function filterSql(f: Record<string, string | undefined>, dateCol: string
     params.push(str(f.to) + 'T23:59');
   }
   if (str(f.q) && searchCols.length) {
-    where.push(`(${searchCols.map((c) => `${c} LIKE ?`).join(' OR ')})`);
+    where.push(`(${searchCols.map((c) => `${c} ILIKE ?`).join(' OR ')})`);
     params.push(...searchCols.map(() => `%${str(f.q)}%`));
   }
   return { where, params };
@@ -81,7 +79,7 @@ const RES_SELECT = `
   LEFT JOIN branches rb ON rb.id = r.return_branch_id
   LEFT JOIN agencies a ON a.id = r.agency_id`;
 
-export function listReservations(f: Record<string, string | undefined> = {}, user?: SessionUser): ReservationRow[] {
+export function listReservations(f: Record<string, string | undefined> = {}, user?: SessionUser): Promise<ReservationRow[]> {
   const { where, params } = filterSql(f, 'r.pickup_at', ['r.code', "c.first_name || ' ' || c.last_name", 'v.plate']);
   for (const [k, col] of [['status', 'r.status'], ['source', 'r.source'], ['category', 'r.category']] as const) {
     if (str(f[k])) {
@@ -102,38 +100,38 @@ export function listReservations(f: Record<string, string | undefined> = {}, use
   return all<ReservationRow>(`${RES_SELECT} ${where.length ? 'WHERE ' + where.join(' AND ') : ''} ORDER BY r.pickup_at DESC LIMIT 500`, ...params);
 }
 
-export function getReservation(id: number): ReservationDetail {
-  const row = one<ReservationRow>(`${RES_SELECT} WHERE r.id = ?`, id);
+export async function getReservation(id: number): Promise<ReservationDetail> {
+  const row = await one<ReservationRow>(`${RES_SELECT} WHERE r.id = ?`, id);
   if (!row) throw new HttpError(404, 'Rezervasyon bulunamadı');
-  const ap = pendingApproval('discount', 'reservation', id);
+  const ap = await pendingApproval('discount', 'reservation', id);
   return {
     ...row,
-    extras: all<LineItem>('SELECT * FROM reservation_extras WHERE reservation_id = ?', id),
-    payments: all<Payment>('SELECT * FROM payments WHERE reservation_id = ? ORDER BY paid_at', id),
-    finance: paymentTotals('reservation_id', id),
+    extras: await all<LineItem>('SELECT * FROM reservation_extras WHERE reservation_id = ?', id),
+    payments: await all<Payment>('SELECT * FROM payments WHERE reservation_id = ? ORDER BY paid_at', id),
+    finance: await paymentTotals('reservation_id', id),
     pending_approval: ap ? { id: ap.id, amount: ap.amount } : null,
   };
 }
 
-function buildReservation(b: Body, existing?: Reservation) {
+async function buildReservation(b: Body, existing?: Reservation) {
   const customerId = num(b.customer_id ?? existing?.customer_id);
   const vehicleId = optId(b.vehicle_id === undefined ? existing?.vehicle_id : b.vehicle_id);
   const pickup = normDateTime(b.pickup_at ?? existing?.pickup_at, 'Alış tarihi');
   const ret = normDateTime(b.return_at ?? existing?.return_at, 'Dönüş tarihi');
   if (ret <= pickup) throw new HttpError(400, 'Dönüş tarihi alış tarihinden sonra olmalıdır');
   if (!existing && pickup.slice(0, 10) < today()) throw new HttpError(400, 'Geçmiş tarihli rezervasyon oluşturulamaz');
-  const vehicle = vehicleId ? mustGet<Vehicle>('vehicles', vehicleId, 'Araç') : null;
+  const vehicle = vehicleId ? await mustGet<Vehicle>('vehicles', vehicleId, 'Araç') : null;
   const category = vehicle?.category ?? str(b.category) ?? existing?.category;
   if (!category) throw new HttpError(400, 'Araç veya araç grubu seçilmelidir');
   if (!(CATEGORIES as readonly string[]).includes(category)) throw new HttpError(400, 'Araç grubu geçersiz');
-  const customer = assertCustomerOk(customerId, pickup);
+  const customer = await assertCustomerOk(customerId, pickup);
   const excl = { excludeReservationId: existing?.id || 0 };
 
   // Müsaitlik: araç seçiliyse araç bazlı, değilse grup bazlı (overbooking kontrolü)
   let waitlist = false;
-  if (vehicle) assertAvailable(vehicle.id, pickup, ret, excl);
+  if (vehicle) await assertAvailable(vehicle.id, pickup, ret, excl);
   else {
-    const g = groupAvailability(category, pickup, ret, excl);
+    const g = await groupAvailability(category, pickup, ret, excl);
     if (g.available <= 0) {
       if (b.waitlist === true || b.waitlist === 'true' || existing?.status === 'waitlist') waitlist = true;
       else throw new HttpError(409, `${category} grubunda bu tarihlerde boş araç yok (${g.free} müsait, ${g.unassigned} atanmamış rezervasyon). Bekleme listesine ekleyebilirsiniz.`, { overbooking: true });
@@ -144,12 +142,12 @@ function buildReservation(b: Body, existing?: Reservation) {
   const agencyId = optId(b.agency_id === undefined ? existing?.agency_id : b.agency_id);
   const pb = optId(b.pickup_branch_id);
   const rb = optId(b.return_branch_id ?? b.pickup_branch_id);
-  const q = calcQuote({
+  const q = await calcQuote({
     vehicle, category, pickup_at: pickup, return_at: ret, extras: parseExtras(b.extras), discount: b.discount, daily_rate: b.daily_rate,
     pickup_branch_id: pb, return_branch_id: rb, channel: source, coupon_code: b.coupon_code, customer,
   });
-  const agency = agencyId ? one<{ commission_pct: number }>('SELECT commission_pct FROM agencies WHERE id = ?', agencyId) : null;
-  const channel = one<{ commission_pct: number }>('SELECT commission_pct FROM channels WHERE code = ?', source);
+  const agency = agencyId ? await one<{ commission_pct: number }>('SELECT commission_pct FROM agencies WHERE id = ?', agencyId) : null;
+  const channel = await one<{ commission_pct: number }>('SELECT commission_pct FROM channels WHERE code = ?', source);
   const commissionPct = agency?.commission_pct ?? channel?.commission_pct ?? 0;
   const data = {
     customer_id: customerId,
@@ -181,9 +179,9 @@ function buildReservation(b: Body, existing?: Reservation) {
   return { data, quote: q, waitlist };
 }
 
-function saveLines(id: number, lines: LineItem[]) {
-  run('DELETE FROM reservation_extras WHERE reservation_id = ?', id);
-  for (const l of lines) insertRow('reservation_extras', { reservation_id: id, extra_id: l.extra_id, name: l.name, quantity: l.quantity, amount: l.amount });
+async function saveLines(id: number, lines: LineItem[]) {
+  await run('DELETE FROM reservation_extras WHERE reservation_id = ?', id);
+  for (const l of lines) await insertRow('reservation_extras', { reservation_id: id, extra_id: l.extra_id, name: l.name, quantity: l.quantity, amount: l.amount });
 }
 
 /** İndirim kullanıcının limitini aşıyorsa onay talebi açılır ve rezervasyon beklemede kalır. */
@@ -193,15 +191,15 @@ function discountNeedsApproval(q: Quote, user: SessionUser) {
   return gross > 0 && (q.discount / gross) * 100 > user.discount_limit_pct + 1e-9;
 }
 
-export function createReservation(b: Body, user: SessionUser): ReservationDetail {
+export async function createReservation(b: Body, user: SessionUser): Promise<ReservationDetail> {
   required(b, [['customer_id', 'Müşteri'], ['pickup_at', 'Alış tarihi'], ['return_at', 'Dönüş tarihi']]);
-  const s = getSettings();
-  const id = tx(() => {
-    const { data, quote: q, waitlist } = buildReservation(b);
+  const s = await getSettings();
+  const id = await tx(async () => {
+    const { data, quote: q, waitlist } = await buildReservation(b);
     const needsApproval = discountNeedsApproval(q, user);
     let status = waitlist ? 'waitlist' : oneOf(b.status, ['pending', 'confirmed'] as const, 'Durum', 'confirmed');
     if (needsApproval && status === 'confirmed') status = 'pending';
-    const newId = insertRow('reservations', {
+    const newId = await insertRow('reservations', {
       ...data,
       status,
       code: `TMP-${crypto.randomUUID()}`,
@@ -209,33 +207,33 @@ export function createReservation(b: Body, user: SessionUser): ReservationDetail
       option_expires_at: status === 'pending' ? fmtDateTime(new Date(Date.now() + num(s.option_hours, 24) * 3600000)) : null,
       created_by: user.id,
     });
-    run('UPDATE reservations SET code = ? WHERE id = ?', makeCode('RZ', newId), newId);
-    saveLines(newId, q.extras);
-    if (q.coupon_id) run('UPDATE coupons SET used_count = used_count + 1 WHERE id = ?', q.coupon_id);
+    await run('UPDATE reservations SET code = ? WHERE id = ?', makeCode('RZ', newId), newId);
+    await saveLines(newId, q.extras);
+    if (q.coupon_id) await run('UPDATE coupons SET used_count = used_count + 1 WHERE id = ?', q.coupon_id);
     if (needsApproval) {
-      const ap = requestApproval('discount', 'reservation', newId, q.discount, `İndirim kullanıcı limitini (%${user.discount_limit_pct}) aşıyor`, {}, user);
-      run('UPDATE reservations SET approval_id = ? WHERE id = ?', ap.id, newId);
+      const ap = await requestApproval('discount', 'reservation', newId, q.discount, `İndirim kullanıcı limitini (%${user.discount_limit_pct}) aşıyor`, {}, user);
+      await run('UPDATE reservations SET approval_id = ? WHERE id = ?', ap.id, newId);
     }
     const pre = num(b.prepayment);
     if (pre > 0) {
-      insertRow('payments', {
+      await insertRow('payments', {
         customer_id: data.customer_id, reservation_id: newId, type: 'payment',
         method: oneOf(b.prepayment_method, METHODS, 'Ödeme yöntemi', 'credit_card'),
         amount: round2(pre), paid_at: nowLocal(), description: 'Rezervasyon ön ödemesi', created_by: user.id,
       });
     }
-    audit('reservation.create', 'reservation', newId, { status, total: q.total_amount, source: data.source });
+    await audit('reservation.create', 'reservation', newId, { status, total: q.total_amount, source: data.source });
     return newId;
   });
-  const r = getReservation(id);
-  if (r.status === 'confirmed') notifyReservation('reservation_confirmed', id, true);
+  const r = await getReservation(id);
+  if (r.status === 'confirmed') await notifyReservation('reservation_confirmed', id, true);
   return r;
 }
 
-export function updateReservation(id: number, b: Body, user: SessionUser): ReservationDetail {
-  const existing = mustGet<Reservation>('reservations', id, 'Rezervasyon');
+export async function updateReservation(id: number, b: Body, user: SessionUser): Promise<ReservationDetail> {
+  const existing = await mustGet<Reservation>('reservations', id, 'Rezervasyon');
   if (!['pending', 'confirmed', 'waitlist'].includes(existing.status)) throw new HttpError(409, 'Yalnızca açık rezervasyonlar düzenlenebilir');
-  tx(() => {
+  await tx(async () => {
     const body: Body = {
       discount: existing.discount,
       daily_rate: existing.daily_rate,
@@ -244,56 +242,58 @@ export function updateReservation(id: number, b: Body, user: SessionUser): Reser
       deposit_amount: existing.deposit_amount,
       source: existing.source,
       ...b,
-      extras: b.extras ?? all('SELECT extra_id, quantity FROM reservation_extras WHERE reservation_id = ?', id),
+      extras: b.extras ?? await all('SELECT extra_id, quantity FROM reservation_extras WHERE reservation_id = ?', id),
     };
     // Araç/grup değiştiyse ve özel fiyat verilmediyse yeni fiyat hesaplanır.
     const groupChanged = (b.vehicle_id !== undefined && optId(b.vehicle_id) !== existing.vehicle_id) || (b.category && b.category !== existing.category);
     if (groupChanged && b.daily_rate === undefined) body.daily_rate = null;
     if (b.coupon_code === undefined && existing.coupon_id) {
-      body.coupon_code = one<{ code: string }>('SELECT code FROM coupons WHERE id = ?', existing.coupon_id)?.code;
+      body.coupon_code = (await one<{ code: string }>('SELECT code FROM coupons WHERE id = ?', existing.coupon_id))?.code;
     }
-    const { data, quote: q, waitlist } = buildReservation(body, existing);
+    const { data, quote: q, waitlist } = await buildReservation(body, existing);
     const update: Record<string, string | number | null> = { ...data };
     if (existing.status === 'waitlist' && !waitlist) update.status = 'confirmed';
     if (q.discount !== existing.discount && discountNeedsApproval(q, user)) {
-      const ap = requestApproval('discount', 'reservation', id, q.discount, `İndirim kullanıcı limitini (%${user.discount_limit_pct}) aşıyor`, {}, user);
+      const ap = await requestApproval('discount', 'reservation', id, q.discount, `İndirim kullanıcı limitini (%${user.discount_limit_pct}) aşıyor`, {}, user);
       update.status = 'pending';
       update.approval_id = ap.id;
     }
-    updateRow('reservations', id, update);
-    saveLines(id, q.extras);
-    run('UPDATE payments SET customer_id = ? WHERE reservation_id = ?', data.customer_id, id);
-    audit('reservation.update', 'reservation', id, { total: q.total_amount });
+    await updateRow('reservations', id, update);
+    await saveLines(id, q.extras);
+    await run('UPDATE payments SET customer_id = ? WHERE reservation_id = ?', data.customer_id, id);
+    await audit('reservation.update', 'reservation', id, { total: q.total_amount });
   });
   return getReservation(id);
 }
 
 /** Grup rezervasyonuna araç atama (teslime yakın). */
-export function assignVehicle(id: number, vehicleId: number | null): ReservationDetail {
-  const r = mustGet<Reservation>('reservations', id, 'Rezervasyon');
+export async function assignVehicle(id: number, vehicleId: number | null): Promise<ReservationDetail> {
+  const r = await mustGet<Reservation>('reservations', id, 'Rezervasyon');
   if (!['pending', 'confirmed', 'waitlist'].includes(r.status)) throw new HttpError(409, 'Rezervasyon açık değil');
   if (vehicleId) {
-    const v = mustGet<Vehicle>('vehicles', vehicleId, 'Araç');
-    assertAvailable(v.id, r.pickup_at, r.return_at, { excludeReservationId: id });
-    updateRow('reservations', id, { vehicle_id: v.id, status: r.status === 'waitlist' ? 'confirmed' : r.status });
-    audit('reservation.assign', 'reservation', id, { vehicle_id: v.id, plate: v.plate, upgrade: v.category !== r.category });
+    const v = await mustGet<Vehicle>('vehicles', vehicleId, 'Araç');
+    await assertAvailable(v.id, r.pickup_at, r.return_at, { excludeReservationId: id });
+    await updateRow('reservations', id, { vehicle_id: v.id, status: r.status === 'waitlist' ? 'confirmed' : r.status });
+    await audit('reservation.assign', 'reservation', id, { vehicle_id: v.id, plate: v.plate, upgrade: v.category !== r.category });
   } else {
-    updateRow('reservations', id, { vehicle_id: null });
-    audit('reservation.unassign', 'reservation', id);
+    await updateRow('reservations', id, { vehicle_id: null });
+    await audit('reservation.unassign', 'reservation', id);
   }
   return getReservation(id);
 }
 
 /** Atanabilecek araçlar; grupta yoksa üst gruplardan upgrade önerileri. */
-export function assignmentOptions(id: number) {
-  const r = mustGet<Reservation>('reservations', id, 'Rezervasyon');
+export async function assignmentOptions(id: number) {
+  const r = await mustGet<Reservation>('reservations', id, 'Rezervasyon');
   const category = r.category ?? '';
-  const free = (cat: string) =>
-    all<Vehicle>(`SELECT * FROM vehicles WHERE category = ? AND status NOT IN ('sold','for_sale','out_of_service','damaged') ORDER BY daily_rate, plate`, cat)
-      .filter((v) => findConflicts(v.id, r.pickup_at, r.return_at, { excludeReservationId: id }).length === 0);
-  const same = free(category);
+  const free = async (cat: string) =>
+    filterSeq(
+      await all<Vehicle>(`SELECT * FROM vehicles WHERE category = ? AND status NOT IN ('sold','for_sale','out_of_service','damaged') ORDER BY daily_rate, plate`, cat),
+      async (v) => (await findConflicts(v.id, r.pickup_at, r.return_at, { excludeReservationId: id })).length === 0,
+    );
+  const same = await free(category);
   const idx = (CATEGORIES as readonly string[]).indexOf(category);
-  const upgrades = idx >= 0 ? (CATEGORIES as readonly string[]).slice(idx + 1).flatMap((c) => free(c)).slice(0, 10) : [];
+  const upgrades = idx >= 0 ? (await mapSeq((CATEGORIES as readonly string[]).slice(idx + 1), (c) => free(c))).flat().slice(0, 10) : [];
   return { category, same, upgrades };
 }
 
@@ -306,20 +306,20 @@ const TRANSITIONS = {
 export type ReservationAction = keyof typeof TRANSITIONS;
 
 /** İptal / no-show politikası ücreti. */
-export function policyFee(r: Reservation, action: 'cancel' | 'no-show', at = new Date()) {
-  const s = getSettings();
+export async function policyFee(r: Reservation, action: 'cancel' | 'no-show', at = new Date()) {
+  const s = await getSettings();
   if (action === 'no-show') return round2(r.daily_rate * num(s.no_show_fee_days, 1));
   const hoursBefore = (parseDate(r.pickup_at)!.getTime() - at.getTime()) / 3600000;
   return hoursBefore >= num(s.free_cancel_hours, 48) ? 0 : round2((r.total_amount * num(s.cancel_fee_pct)) / 100);
 }
 
-export function transitionReservation(id: number, action: ReservationAction, b: Body = {}, user?: SessionUser): ReservationDetail {
+export async function transitionReservation(id: number, action: ReservationAction, b: Body = {}, user?: SessionUser): Promise<ReservationDetail> {
   const t = TRANSITIONS[action];
-  const row = mustGet<Reservation>('reservations', id, 'Rezervasyon');
+  const row = await mustGet<Reservation>('reservations', id, 'Rezervasyon');
   if (!(t.from as readonly string[]).includes(row.status)) throw new HttpError(409, `Bu işlem "${row.status}" durumundaki rezervasyona uygulanamaz`);
   if (action === 'confirm') {
-    if (pendingApproval('discount', 'reservation', id)) throw new HttpError(409, 'İndirim onayı bekleniyor; onaylanmadan rezervasyon onaylanamaz');
-    if (row.status === 'waitlist' && !row.vehicle_id && groupAvailability(row.category!, row.pickup_at, row.return_at, { excludeReservationId: id }).available <= 0) {
+    if (await pendingApproval('discount', 'reservation', id)) throw new HttpError(409, 'İndirim onayı bekleniyor; onaylanmadan rezervasyon onaylanamaz');
+    if (row.status === 'waitlist' && !row.vehicle_id && (await groupAvailability(row.category!, row.pickup_at, row.return_at, { excludeReservationId: id })).available <= 0) {
       throw new HttpError(409, 'Grupta hâlâ boş araç yok');
     }
   }
@@ -328,35 +328,35 @@ export function transitionReservation(id: number, action: ReservationAction, b: 
     update.cancel_reason = str(b.reason) || (action === 'no-show' ? 'Müşteri gelmedi' : null);
     const waive = b.waive_fee === true || b.waive_fee === 'true';
     if (waive && user && !can(user, 'approve')) throw new HttpError(403, 'Ücretsiz iptal için onay yetkisi gerekir');
-    update.cancellation_fee = waive || row.status === 'waitlist' ? 0 : policyFee(row, action);
+    update.cancellation_fee = waive || row.status === 'waitlist' ? 0 : await policyFee(row, action);
   }
   if (action === 'confirm') update.option_expires_at = null;
-  updateRow('reservations', id, update);
-  audit(`reservation.${action}`, 'reservation', id, { fee: update.cancellation_fee, reason: update.cancel_reason });
-  const r = getReservation(id);
-  if (action === 'confirm') notifyReservation('reservation_confirmed', id, true);
+  await updateRow('reservations', id, update);
+  await audit(`reservation.${action}`, 'reservation', id, { fee: update.cancellation_fee, reason: update.cancel_reason });
+  const r = await getReservation(id);
+  if (action === 'confirm') await notifyReservation('reservation_confirmed', id, true);
   return r;
 }
 
 /** Opsiyon süresi dolan bekleyen rezervasyonları iptal eder. */
-export function expireOptions(): number {
-  const expired = all<{ id: number }>("SELECT id FROM reservations WHERE status = 'pending' AND option_expires_at IS NOT NULL AND option_expires_at < ?", nowLocal());
+export async function expireOptions(): Promise<number> {
+  const expired = await all<{ id: number }>("SELECT id FROM reservations WHERE status = 'pending' AND option_expires_at IS NOT NULL AND option_expires_at < ?", nowLocal());
   for (const r of expired) {
-    if (pendingApproval('discount', 'reservation', r.id)) continue;
-    updateRow('reservations', r.id, { status: 'cancelled', cancel_reason: 'Opsiyon süresi doldu' });
-    audit('reservation.option_expired', 'reservation', r.id);
+    if (await pendingApproval('discount', 'reservation', r.id)) continue;
+    await updateRow('reservations', r.id, { status: 'cancelled', cancel_reason: 'Opsiyon süresi doldu' });
+    await audit('reservation.option_expired', 'reservation', r.id);
   }
   return expired.length;
 }
 
 /** İndirim onayı sonucu (approvals modülü çağırır). */
-export function applyDiscountDecision(id: number, approved: boolean) {
-  const r = mustGet<Reservation>('reservations', id, 'Rezervasyon');
+export async function applyDiscountDecision(id: number, approved: boolean) {
+  const r = await mustGet<Reservation>('reservations', id, 'Rezervasyon');
   if (approved) {
-    if (r.status === 'pending') updateRow('reservations', id, { status: 'confirmed', option_expires_at: null });
-    notifyReservation('reservation_confirmed', id, true);
+    if (r.status === 'pending') await updateRow('reservations', id, { status: 'confirmed', option_expires_at: null });
+    await notifyReservation('reservation_confirmed', id, true);
   } else {
     const total = round2(subtotal({ ...r, discount: 0 }));
-    updateRow('reservations', id, { discount: 0, total_amount: total, status: r.status === 'pending' ? 'confirmed' : r.status });
+    await updateRow('reservations', id, { discount: 0, total_amount: total, status: r.status === 'pending' ? 'confirmed' : r.status });
   }
 }

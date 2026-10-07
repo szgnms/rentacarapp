@@ -1,10 +1,24 @@
 // Bildirim motoru: şablon (e-posta/SMS/WhatsApp) + değişkenler → gönderim logu.
 // E-posta SMTP yapılandırıldıysa gerçekten gönderilir; SMS/WhatsApp sağlayıcı entegrasyonu için kuyruk/log tutulur.
-import { all, getSettings, insertRow, one, run } from '../db';
-import { HttpError, nowLocal, num, str } from '../core';
+import { after } from 'next/server';
+import { all, getSettings, insertRow, one, outsideTx, run } from '../db';
+import { HttpError, mapSeq, nowLocal, num, str } from '../core';
 import { dt, money } from '../format';
 import { readFile } from '../files';
 import type { Customer } from '../types';
+
+/**
+ * Yanıt gönderildikten sonra çalışacak iş (e-posta kuyruğu). Sunucusuz ortamda yanıt sonrası
+ * süreç dondurulabildiğinden Next.js `after()` kullanılır; istek dışında (test, betik) setImmediate.
+ */
+function later(fn: () => Promise<unknown>) {
+  const job = () => outsideTx(() => fn()).catch((e) => console.error('Bildirim gönderimi', e));
+  try {
+    after(job);
+  } catch {
+    setImmediate(() => void job());
+  }
+}
 
 export const TRIGGERS: Record<string, string> = {
   reservation_confirmed: 'Rezervasyon onayı',
@@ -57,17 +71,17 @@ export interface MessageLog {
 export const render = (tpl: string, vars: Record<string, unknown>) =>
   tpl.replace(/\{\{\s*(\w+)\s*\}\}/g, (_, k) => (vars[k] === undefined || vars[k] === null ? '' : String(vars[k])));
 
-export function hasConsent(customerId: number, type: string): boolean {
-  const c = one<{ granted: number }>('SELECT granted FROM consents WHERE customer_id = ? AND type = ? ORDER BY id DESC LIMIT 1', customerId, type);
+export async function hasConsent(customerId: number, type: string): Promise<boolean> {
+  const c = await one<{ granted: number }>('SELECT granted FROM consents WHERE customer_id = ? AND type = ? ORDER BY id DESC LIMIT 1', customerId, type);
   return !!c?.granted;
 }
 
-const smtpReady = () => {
-  const s = getSettings();
+const smtpReady = async () => {
+  const s = await getSettings();
   return !!(s.smtp_host && s.smtp_from);
 };
 
-export const portalUrl = (token: string | null | undefined) => (token ? `${getSettings().public_base_url.replace(/\/$/, '')}/portal/${token}` : '');
+export const portalUrl = async (token: string | null | undefined) => (token ? `${(await getSettings()).public_base_url.replace(/\/$/, '')}/portal/${token}` : '');
 
 interface SendOptions {
   customer: Customer;
@@ -79,8 +93,8 @@ interface SendOptions {
 }
 
 /** Tetikleyici koduna ait tüm aktif şablonları müşteriye gönderir (kuyruğa alır). */
-export function sendTemplate(code: string, o: SendOptions): MessageLog[] {
-  const s = getSettings();
+export async function sendTemplate(code: string, o: SendOptions): Promise<MessageLog[]> {
+  const s = await getSettings();
   if (s.notify_auto !== '1' && code !== 'manual') return [];
   if (o.customer.anonymized_at) return [];
   const lang = o.customer.preferred_language || 'tr';
@@ -90,35 +104,35 @@ export function sendTemplate(code: string, o: SendOptions): MessageLog[] {
   const out: MessageLog[] = [];
   for (const channel of CHANNELS) {
     const tpl =
-      one<NotificationTemplate>('SELECT * FROM notification_templates WHERE code = ? AND channel = ? AND language = ? AND active = 1', code, channel, lang) ??
-      one<NotificationTemplate>("SELECT * FROM notification_templates WHERE code = ? AND channel = ? AND language = 'tr' AND active = 1", code, channel);
+      await one<NotificationTemplate>('SELECT * FROM notification_templates WHERE code = ? AND channel = ? AND language = ? AND active = 1', code, channel, lang) ??
+      await one<NotificationTemplate>("SELECT * FROM notification_templates WHERE code = ? AND channel = ? AND language = 'tr' AND active = 1", code, channel);
     if (!tpl) continue;
     const dedupe = o.dedupeKey ? `${o.dedupeKey}:${channel}` : null;
-    if (dedupe && one('SELECT 1 FROM message_log WHERE dedupe_key = ?', dedupe)) continue;
+    if (dedupe && await one('SELECT 1 FROM message_log WHERE dedupe_key = ?', dedupe)) continue;
     const to = channel === 'email' ? o.customer.email : o.customer.phone;
     let status: MessageLog['status'] = 'queued';
     let error: string | null = null;
     if (!to) [status, error] = ['skipped', channel === 'email' ? 'Müşterinin e-posta adresi yok' : 'Müşterinin telefonu yok'];
-    else if (tpl.marketing && !hasConsent(o.customer.id, CONSENT_FOR[channel])) [status, error] = ['skipped', 'İYS/pazarlama izni yok'];
-    else if (channel === 'email' && !smtpReady()) [status, error] = ['skipped', 'SMTP yapılandırılmamış — mesaj kayda alındı'];
+    else if (tpl.marketing && !await hasConsent(o.customer.id, CONSENT_FOR[channel])) [status, error] = ['skipped', 'İYS/pazarlama izni yok'];
+    else if (channel === 'email' && !await smtpReady()) [status, error] = ['skipped', 'SMTP yapılandırılmamış — mesaj kayda alındı'];
     else if (channel !== 'email') [status, error] = ['skipped', `${channel === 'sms' ? 'SMS' : 'WhatsApp'} sağlayıcısı yapılandırılmamış — mesaj kayda alındı`];
-    const id = insertRow('message_log', {
+    const id = await insertRow('message_log', {
       template_code: code, channel, to_address: to, subject: tpl.subject ? render(tpl.subject, vars) : null, body: render(tpl.body, vars),
       status, error, entity: o.entity, entity_id: o.entityId, customer_id: o.customer.id, dedupe_key: dedupe,
       attachments: o.attachments?.length ? JSON.stringify(o.attachments) : null,
     });
-    out.push(one<MessageLog>('SELECT * FROM message_log WHERE id = ?', id)!);
+    out.push((await one<MessageLog>('SELECT * FROM message_log WHERE id = ?', id))!);
   }
-  if (out.some((m) => m.status === 'queued')) setImmediate(() => void processOutbox().catch((e) => console.error('Bildirim gönderimi', e)));
+  if (out.some((m) => m.status === 'queued')) later(processOutbox);
   return out;
 }
 
 /** Kuyruktaki e-postaları SMTP ile gönderir. */
 export async function processOutbox(): Promise<{ sent: number; failed: number }> {
-  const queued = all<MessageLog>("SELECT * FROM message_log WHERE status = 'queued' AND channel = 'email' ORDER BY id LIMIT 50");
+  const queued = await all<MessageLog>("SELECT * FROM message_log WHERE status = 'queued' AND channel = 'email' ORDER BY id LIMIT 50");
   if (!queued.length) return { sent: 0, failed: 0 };
-  if (!smtpReady()) return { sent: 0, failed: 0 };
-  const s = getSettings();
+  if (!await smtpReady()) return { sent: 0, failed: 0 };
+  const s = await getSettings();
   const nodemailer = await import('nodemailer');
   const transport = nodemailer.createTransport({
     host: s.smtp_host, port: num(s.smtp_port, 587), secure: num(s.smtp_port) === 465,
@@ -128,15 +142,15 @@ export async function processOutbox(): Promise<{ sent: number; failed: number }>
   let failed = 0;
   for (const m of queued) {
     try {
-      const attachments = (m.attachments ? (JSON.parse(m.attachments) as number[]) : []).map((fid) => {
-        const { file, data } = readFile(fid);
+      const attachments = await mapSeq(m.attachments ? (JSON.parse(m.attachments) as number[]) : [], async (fid) => {
+        const { file, data } = await readFile(fid);
         return { filename: file.original_name || `belge-${fid}.pdf`, content: data, contentType: file.mime };
       });
       await transport.sendMail({ from: s.smtp_from, to: m.to_address!, subject: m.subject ?? s.company_name, text: m.body, attachments });
-      run("UPDATE message_log SET status = 'sent', sent_at = ?, error = NULL WHERE id = ?", nowLocal(), m.id);
+      await run("UPDATE message_log SET status = 'sent', sent_at = ?, error = NULL WHERE id = ?", nowLocal(), m.id);
       sent++;
     } catch (e) {
-      run("UPDATE message_log SET status = 'failed', error = ? WHERE id = ?", String((e as Error).message).slice(0, 500), m.id);
+      await run("UPDATE message_log SET status = 'failed', error = ? WHERE id = ?", String((e as Error).message).slice(0, 500), m.id);
       failed++;
     }
   }
@@ -144,23 +158,23 @@ export async function processOutbox(): Promise<{ sent: number; failed: number }>
 }
 
 /** Başarısız/atlanmış mesajı tekrar kuyruğa alır. */
-export function retryMessage(id: number) {
-  const m = one<MessageLog>('SELECT * FROM message_log WHERE id = ?', id);
+export async function retryMessage(id: number) {
+  const m = await one<MessageLog>('SELECT * FROM message_log WHERE id = ?', id);
   if (!m) throw new HttpError(404, 'Mesaj bulunamadı');
-  run("UPDATE message_log SET status = 'queued', error = NULL WHERE id = ?", id);
-  if (m.channel !== 'email' || !smtpReady()) {
-    run("UPDATE message_log SET status = 'skipped', error = ? WHERE id = ?", m.channel === 'email' ? 'SMTP yapılandırılmamış' : 'Sağlayıcı yapılandırılmamış', id);
-  } else setImmediate(() => void processOutbox());
+  await run("UPDATE message_log SET status = 'queued', error = NULL WHERE id = ?", id);
+  if (m.channel !== 'email' || !await smtpReady()) {
+    await run("UPDATE message_log SET status = 'skipped', error = ? WHERE id = ?", m.channel === 'email' ? 'SMTP yapılandırılmamış' : 'Sağlayıcı yapılandırılmamış', id);
+  } else later(processOutbox);
   return one<MessageLog>('SELECT * FROM message_log WHERE id = ?', id);
 }
 
-export function listMessages(f: { status?: string; channel?: string; customer_id?: string; q?: string } = {}): MessageLog[] {
+export function listMessages(f: { status?: string; channel?: string; customer_id?: string; q?: string } = {}): Promise<MessageLog[]> {
   const where: string[] = [];
   const params: (string | number)[] = [];
   if (str(f.status)) { where.push('status = ?'); params.push(str(f.status)!); }
   if (str(f.channel)) { where.push('channel = ?'); params.push(str(f.channel)!); }
   if (str(f.customer_id)) { where.push('customer_id = ?'); params.push(num(f.customer_id)); }
-  if (str(f.q)) { where.push('(to_address LIKE ? OR subject LIKE ? OR body LIKE ?)'); params.push(...Array(3).fill(`%${str(f.q)}%`)); }
+  if (str(f.q)) { where.push('(to_address ILIKE ? OR subject ILIKE ? OR body ILIKE ?)'); params.push(...Array(3).fill(`%${str(f.q)}%`)); }
   return all<MessageLog>(`SELECT * FROM message_log ${where.length ? 'WHERE ' + where.join(' AND ') : ''} ORDER BY id DESC LIMIT 500`, ...params);
 }
 
@@ -168,36 +182,36 @@ export function listMessages(f: { status?: string; channel?: string; customer_id
 
 const customerOf = (id: number) => one<Customer>('SELECT * FROM customers WHERE id = ?', id);
 
-export function notifyReservation(code: string, reservationId: number, dedupe?: boolean) {
-  const r = one<Record<string, unknown> & { customer_id: number; portal_token: string | null }>(
+export async function notifyReservation(code: string, reservationId: number, dedupe?: boolean) {
+  const r = await one<Record<string, unknown> & { customer_id: number; portal_token: string | null }>(
     `SELECT r.*, pb.name AS pickup_branch, rb.name AS return_branch FROM reservations r
      LEFT JOIN branches pb ON pb.id = r.pickup_branch_id LEFT JOIN branches rb ON rb.id = r.return_branch_id WHERE r.id = ?`, reservationId,
   );
-  const customer = r && customerOf(r.customer_id);
+  const customer = r && await customerOf(r.customer_id);
   if (!r || !customer) return [];
   return sendTemplate(code, {
     customer, entity: 'reservation', entityId: reservationId, dedupeKey: dedupe ? `${code}:reservation:${reservationId}` : undefined,
     vars: {
       code: r.code, category: r.category, pickup_at: dt(String(r.pickup_at)), return_at: dt(String(r.return_at)),
-      pickup_branch: r.pickup_branch, return_branch: r.return_branch, total: money(Number(r.total_amount)), portal_url: portalUrl(r.portal_token),
+      pickup_branch: r.pickup_branch, return_branch: r.return_branch, total: money(Number(r.total_amount)), portal_url: await portalUrl(r.portal_token),
     },
   });
 }
 
-export function notifyRental(code: string, rentalId: number, opts: { attachments?: number[]; dedupeKey?: string; vars?: Record<string, unknown> } = {}) {
-  const r = one<Record<string, unknown> & { customer_id: number; portal_token: string | null; total_amount: number }>(
+export async function notifyRental(code: string, rentalId: number, opts: { attachments?: number[]; dedupeKey?: string; vars?: Record<string, unknown> } = {}) {
+  const r = await one<Record<string, unknown> & { customer_id: number; portal_token: string | null; total_amount: number }>(
     `SELECT r.*, v.plate, rb.name AS return_branch FROM rentals r JOIN vehicles v ON v.id = r.vehicle_id
      LEFT JOIN branches rb ON rb.id = r.return_branch_id WHERE r.id = ?`, rentalId,
   );
-  const customer = r && customerOf(r.customer_id);
+  const customer = r && await customerOf(r.customer_id);
   if (!r || !customer) return [];
-  const paid = all<{ type: string; t: number }>(`SELECT type, SUM(amount) t FROM payments WHERE rental_id = ? GROUP BY type`, rentalId)
+  const paid = (await all<{ type: string; t: number }>(`SELECT type, SUM(amount) t FROM payments WHERE rental_id = ? GROUP BY type`, rentalId))
     .reduce((a, x) => a + (x.type === 'payment' ? x.t : x.type === 'refund' ? -x.t : 0), 0);
   return sendTemplate(code, {
     customer, entity: 'rental', entityId: rentalId, attachments: opts.attachments, dedupeKey: opts.dedupeKey,
     vars: {
       contract_no: r.contract_no, plate: r.plate, return_at: dt(String(r.planned_return_at)), return_branch: r.return_branch,
-      total: money(r.total_amount), paid: money(paid), balance: money(r.total_amount - paid), portal_url: portalUrl(r.portal_token), ...opts.vars,
+      total: money(r.total_amount), paid: money(paid), balance: money(r.total_amount - paid), portal_url: await portalUrl(r.portal_token), ...opts.vars,
     },
   });
 }

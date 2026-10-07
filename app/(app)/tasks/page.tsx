@@ -18,20 +18,20 @@ const STATUS: Record<string, [string, '' | 'ok' | 'warn' | 'danger' | 'info' | '
 
 export default async function TasksPage({ searchParams }: { searchParams: SearchParams }) {
   const [q, user] = await Promise.all([flat(searchParams), requireUser()]);
-  const rows = listTasks({ ...q, status: q.status ?? 'open_all' }, user);
+  const rows = await listTasks({ ...q, status: q.status ?? 'open_all' }, user);
   const manage = can(user, 'tasks.manage');
-  const vehicles = vehicleOptions().map((v) => [v.id, v.label] as [number, string]);
-  const users = listUsers().filter((u) => u.active).map((u) => [u.id, u.full_name] as [number, string]);
+  const vehicles = (await vehicleOptions()).map((v) => [v.id, v.label] as [number, string]);
+  const users = (await listUsers()).filter((u) => u.active).map((u) => [u.id, u.full_name] as [number, string]);
   const fields: FieldSpec[] = [
     { name: 'type', label: 'Tip', type: 'select', options: Object.entries(TASK_TYPES), required: true, span: 4 },
     { name: 'priority', label: 'Öncelik', type: 'select', options: Object.entries(PRIORITY).map(([k, v]) => [k, v[0]] as [string, string]), span: 4 },
     { name: 'due_at', label: 'Termin', type: 'datetime-local', span: 4 },
     { name: 'title', label: 'Başlık', span: 12, placeholder: 'Boş bırakılırsa tip adı kullanılır' },
-    { name: 'rental_id', label: 'Sözleşme', type: 'select', options: rentalOptions(), empty: '—', span: 6 },
+    { name: 'rental_id', label: 'Sözleşme', type: 'select', options: await rentalOptions(), empty: '—', span: 6 },
     { name: 'vehicle_id', label: 'Araç', type: 'select', options: vehicles, empty: '—', span: 6 },
     { name: 'replacement_vehicle_id', label: 'İkame araç (ikame iş emri)', type: 'select', options: vehicles, empty: '—', span: 6 },
     { name: 'assigned_to', label: 'Sorumlu', type: 'select', options: users, empty: 'Atanmadı', span: 6 },
-    { name: 'branch_id', label: 'Şube', type: 'select', options: listBranches().map((b) => [b.id, b.name] as [number, string]), empty: '—', span: 6 },
+    { name: 'branch_id', label: 'Şube', type: 'select', options: (await listBranches()).map((b) => [b.id, b.name] as [number, string]), empty: '—', span: 6 },
     { name: 'cost', label: 'Tahmini maliyet (₺)', type: 'number', span: 6 },
     { name: 'address', label: 'Adres / konum', span: 12 },
     { name: 'notes', label: 'Not', type: 'textarea', span: 12 },

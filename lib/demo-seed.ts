@@ -1,9 +1,8 @@
 // Demo verisi: şubeler, roller, fiyat tabloları, araçlar, müşteriler, sözleşmeler, rezervasyonlar, HGS/ceza, iş emirleri.
 // Boş (yeni oluşturulmuş) veritabanında çalıştırılmalıdır.
 import crypto from 'node:crypto';
-import type { DatabaseSync } from 'node:sqlite';
-import { insertRow } from './db';
-import { addDays, fmtDate, fmtDateTime, makeCode } from './core';
+import { all, insertRow, one, run } from './db';
+import { addDays, fmtDate, fmtDateTime, makeCode, mapSeq } from './core';
 import { calcQuote, recalcRental, rentalFinance } from './rules';
 import { hashPassword } from './password';
 import { importTolls } from './domain/tolls';
@@ -13,12 +12,12 @@ import type { Customer, Rental, Vehicle } from './types';
 
 type ExtraSelection = { extra_id: number; quantity: number };
 
-export async function seedDemo(db: DatabaseSync) {
-  const get = <T,>(sql: string, ...p: (string | number | null)[]) => db.prepare(sql).get(...p) as T;
-  const exec = (sql: string, ...p: (string | number | null)[]) => db.prepare(sql).run(...p);
-  const getVehicle = (id: number) => ({ ...get<Vehicle>('SELECT * FROM vehicles WHERE id = ?', id) });
-  const getCustomer = (id: number) => ({ ...get<Customer>('SELECT * FROM customers WHERE id = ?', id) });
-  const extraId = (code: string) => get<{ id: number }>('SELECT id FROM extras WHERE code = ? OR name = ?', code, code).id;
+export async function seedDemo() {
+  const get = async <T,>(sql: string, ...p: (string | number | null)[]) => (await one<T>(sql, ...p)) as T;
+  const exec = (sql: string, ...p: (string | number | null)[]) => run(sql, ...p);
+  const getVehicle = (id: number) => get<Vehicle>('SELECT * FROM vehicles WHERE id = ?', id);
+  const getCustomer = (id: number) => get<Customer>('SELECT * FROM customers WHERE id = ?', id);
+  const extraId = async (code: string) => (await get<{ id: number }>('SELECT id FROM extras WHERE code = ? OR name = ?', code, code)).id;
   const token = () => crypto.randomBytes(18).toString('base64url');
 
   const at = (dayOffset: number, hour = 10, minute = 0) => {
@@ -37,11 +36,10 @@ export async function seedDemo(db: DatabaseSync) {
     return [...d, d10, d11].join('');
   };
 
-  db.exec('BEGIN');
   // ---------- Şubeler & kullanıcılar ----------
-  exec("UPDATE branches SET name = 'İstanbul Merkez', city = 'İstanbul', address = 'Büyükdere Cad. No:1 Şişli', phone = '0212 000 00 00' WHERE id = 1");
-  const b2 = insertRow('branches', { name: 'Sabiha Gökçen Havalimanı', city: 'İstanbul', address: 'SAW Dış Hatlar Geliş', phone: '0216 000 00 00' });
-  const b3 = insertRow('branches', { name: 'Ankara Esenboğa', city: 'Ankara', address: 'ESB İç Hatlar', phone: '0312 000 00 00' });
+  await exec("UPDATE branches SET name = 'İstanbul Merkez', city = 'İstanbul', address = 'Büyükdere Cad. No:1 Şişli', phone = '0212 000 00 00' WHERE id = 1");
+  const b2 = await insertRow('branches', { name: 'Sabiha Gökçen Havalimanı', city: 'İstanbul', address: 'SAW Dış Hatlar Geliş', phone: '0216 000 00 00' });
+  const b3 = await insertRow('branches', { name: 'Ankara Esenboğa', city: 'Ankara', address: 'ESB İç Hatlar', phone: '0312 000 00 00' });
 
   const users: [string, string, string, number | null, number][] = [
     ['mudur', 'Bölge Müdürü', 'branch_manager', null, 25],
@@ -53,12 +51,12 @@ export async function seedDemo(db: DatabaseSync) {
   ];
   const uid: Record<string, number> = { admin: 1 };
   for (const [username, full_name, role, branch_id, limit] of users) {
-    uid[username] = insertRow('users', { username, full_name, role, branch_id, discount_limit_pct: limit, password_hash: hashPassword(`${username}123`) });
+    uid[username] = await insertRow('users', { username, full_name, role, branch_id, discount_limit_pct: limit, password_hash: hashPassword(`${username}123`) });
   }
 
   // ---------- Fiyatlandırma ----------
-  const summer = insertRow('seasons', { name: 'Yaz sezonu', start_date: `${day(0).slice(0, 4)}-06-01`, end_date: `${day(0).slice(0, 4)}-09-15`, priority: 10 });
-  const holiday = insertRow('seasons', { name: 'Yılbaşı', start_date: `${day(0).slice(0, 4)}-12-20`, end_date: `${Number(day(0).slice(0, 4)) + 1}-01-05`, priority: 20 });
+  const summer = await insertRow('seasons', { name: 'Yaz sezonu', start_date: `${day(0).slice(0, 4)}-06-01`, end_date: `${day(0).slice(0, 4)}-09-15`, priority: 10 });
+  const holiday = await insertRow('seasons', { name: 'Yılbaşı', start_date: `${day(0).slice(0, 4)}-12-20`, end_date: `${Number(day(0).slice(0, 4)) + 1}-01-05`, priority: 20 });
   const plans: [string, number, number, number, number, number][] = [
     ['Ekonomi', 1250, 1150, 1050, 950, 850],
     ['Orta', 1850, 1700, 1550, 1400, 1250],
@@ -68,19 +66,19 @@ export async function seedDemo(db: DatabaseSync) {
     ['Lüks', 5400, 5100, 4800, 4500, 4200],
   ];
   for (const [category, a, b, c, d, e] of plans) {
-    insertRow('rate_plans', { name: `${category} standart`, category, band_1_3: a, band_4_7: b, band_8_14: c, band_15_29: d, band_30: e });
-    insertRow('rate_plans', { name: `${category} yaz`, category, season_id: summer, band_1_3: a * 1.3, band_4_7: b * 1.3, band_8_14: c * 1.3, band_15_29: d * 1.3, band_30: e * 1.3 });
+    await insertRow('rate_plans', { name: `${category} standart`, category, band_1_3: a, band_4_7: b, band_8_14: c, band_15_29: d, band_30: e });
+    await insertRow('rate_plans', { name: `${category} yaz`, category, season_id: summer, band_1_3: a * 1.3, band_4_7: b * 1.3, band_8_14: c * 1.3, band_15_29: d * 1.3, band_30: e * 1.3 });
   }
-  insertRow('rate_plans', { name: 'Ekonomi yılbaşı', category: 'Ekonomi', season_id: holiday, band_1_3: 1700, band_4_7: 1600, band_8_14: 1500, band_15_29: 1300, band_30: 1100 });
-  insertRow('rate_plans', { name: 'Ekonomi web', category: 'Ekonomi', channel: 'Web', band_1_3: 1150, band_4_7: 1050, band_8_14: 950, band_15_29: 880, band_30: 800 });
-  insertRow('coupons', { code: 'ERKEN10', description: 'Erken rezervasyon %10', type: 'percent', value: 10, early_booking_days: 14 });
-  insertRow('coupons', { code: 'HAFTA500', description: '7+ gün 500 ₺ indirim', type: 'amount', value: 500, min_days: 7, max_uses: 100 });
-  insertRow('coupons', { code: 'SUVYAZ', description: 'SUV grubunda %15', type: 'percent', value: 15, category: 'SUV', valid_to: day(60) });
-  insertRow('deposit_rules', { category: 'Lüks', amount: 30000, note: 'Lüks segment provizyonu' });
-  insertRow('deposit_rules', { driver_age_under: 25, amount: 10000, note: 'Genç sürücü depozitosu' });
-  insertRow('deposit_rules', { license_years_under: 3, amount: 8000, note: 'Yeni ehliyet depozitosu' });
-  const ag1 = insertRow('agencies', { name: 'Tatil Dünyası Turizm', contact_name: 'Seda Uç', phone: '0212 444 00 00', email: 'b2b@tatildunyasi.example', tax_no: '9876543210', commission_pct: 12 });
-  const ag2 = insertRow('agencies', { name: 'RentBroker.com', contact_name: 'API Desk', email: 'ops@rentbroker.example', commission_pct: 15 });
+  await insertRow('rate_plans', { name: 'Ekonomi yılbaşı', category: 'Ekonomi', season_id: holiday, band_1_3: 1700, band_4_7: 1600, band_8_14: 1500, band_15_29: 1300, band_30: 1100 });
+  await insertRow('rate_plans', { name: 'Ekonomi web', category: 'Ekonomi', channel: 'Web', band_1_3: 1150, band_4_7: 1050, band_8_14: 950, band_15_29: 880, band_30: 800 });
+  await insertRow('coupons', { code: 'ERKEN10', description: 'Erken rezervasyon %10', type: 'percent', value: 10, early_booking_days: 14 });
+  await insertRow('coupons', { code: 'HAFTA500', description: '7+ gün 500 ₺ indirim', type: 'amount', value: 500, min_days: 7, max_uses: 100 });
+  await insertRow('coupons', { code: 'SUVYAZ', description: 'SUV grubunda %15', type: 'percent', value: 15, category: 'SUV', valid_to: day(60) });
+  await insertRow('deposit_rules', { category: 'Lüks', amount: 30000, note: 'Lüks segment provizyonu' });
+  await insertRow('deposit_rules', { driver_age_under: 25, amount: 10000, note: 'Genç sürücü depozitosu' });
+  await insertRow('deposit_rules', { license_years_under: 3, amount: 8000, note: 'Yeni ehliyet depozitosu' });
+  const ag1 = await insertRow('agencies', { name: 'Tatil Dünyası Turizm', contact_name: 'Seda Uç', phone: '0212 444 00 00', email: 'b2b@tatildunyasi.example', tax_no: '9876543210', commission_pct: 12 });
+  const ag2 = await insertRow('agencies', { name: 'RentBroker.com', contact_name: 'API Desk', email: 'ops@rentbroker.example', commission_pct: 15 });
 
   // ---------- Araçlar ----------
   const vehicles: [string, string, string, number, string, string, string, number, number, number, string][] = [
@@ -97,8 +95,8 @@ export async function seedDemo(db: DatabaseSync) {
     ['34 ABC 108', 'Fiat', 'Egea Cross', 2024, 'Ekonomi', 'Benzin', 'Otomatik', 1300, 5000, 6400, 'CFAR'],
     ['34 ABC 109', 'Renault', 'Megane', 2021, 'Orta', 'Dizel', 'Otomatik', 1700, 7500, 98500, 'IDAR'],
   ];
-  const vIds = vehicles.map(([plate, brand, model, year, category, fuel, trans, rate, dep, km, acriss], i) => {
-    const id = insertRow('vehicles', {
+  const vIds = await mapSeq(vehicles, async ([plate, brand, model, year, category, fuel, trans, rate, dep, km, acriss], i) => {
+    const id = await insertRow('vehicles', {
       plate, brand, model, year, category, fuel_type: fuel, transmission: trans, daily_rate: rate, deposit_amount: dep, acriss,
       current_km: km, km_limit_per_day: 300, extra_km_fee: 5, seats: category === 'Minivan' ? 7 : 5, luggage: category === 'Minivan' ? 4 : 2,
       branch_id: plate.startsWith('06') ? b3 : i % 3 === 0 ? b2 : 1, parking_spot: `${plate.startsWith('06') ? 'E' : i % 3 === 0 ? 'S' : 'M'}-${10 + i}`,
@@ -111,9 +109,9 @@ export async function seedDemo(db: DatabaseSync) {
     });
     const docs: [string, number, string][] = [['traffic_insurance', 20 + i * 30, 'Anadolu Sigorta'], ['kasko', 90 + i * 20, 'Axa Sigorta'], ['inspection', i === 3 ? -5 : 200 + i * 15, 'TÜVTÜRK'], ['exhaust', 150 + i * 5, 'TÜVTÜRK']];
     for (const [type, offset, provider] of docs) {
-      insertRow('vehicle_documents', { vehicle_id: id, type, provider, number: `${type.slice(0, 3).toUpperCase()}-${id}${offset}`, issued_at: day(offset - 365), expires_at: day(offset), cost: type === 'kasko' ? rate * 9 : type === 'traffic_insurance' ? 6500 : 0 });
+      await insertRow('vehicle_documents', { vehicle_id: id, type, provider, number: `${type.slice(0, 3).toUpperCase()}-${id}${offset}`, issued_at: day(offset - 365), expires_at: day(offset), cost: type === 'kasko' ? rate * 9 : type === 'traffic_insurance' ? 6500 : 0 });
     }
-    exec('UPDATE vehicles SET insurance_expiry = ?, kasko_expiry = ?, inspection_expiry = ? WHERE id = ?', day(20 + i * 30), day(90 + i * 20), day(i === 3 ? -5 : 200 + i * 15), id);
+    await exec('UPDATE vehicles SET insurance_expiry = ?, kasko_expiry = ?, inspection_expiry = ? WHERE id = ?', day(20 + i * 30), day(90 + i * 20), day(i === 3 ? -5 : 200 + i * 15), id);
     return id;
   });
 
@@ -130,29 +128,29 @@ export async function seedDemo(db: DatabaseSync) {
     ['John', 'Smith', '1979-02-14', '+44 7700 900123', 'john.smith@example.co.uk', 'UK-SMITH790214', '1997-08-01', 'en'],
     ['Anna', 'Müller', '1987-10-03', '+49 151 2345678', 'anna.mueller@example.de', 'DE-B07X2', '2006-04-20', 'de'],
   ];
-  const cIds = customers.map(([first_name, last_name, birth_date, phone, email, license_no, license_date, lang], i) => {
+  const cIds = await mapSeq(customers, async ([first_name, last_name, birth_date, phone, email, license_no, license_date, lang], i) => {
     const foreign = lang !== 'tr';
-    const id = insertRow('customers', {
+    const id = await insertRow('customers', {
       first_name, last_name, birth_date, phone, email, license_no, license_date, license_class: 'B', preferred_language: lang,
       national_id: foreign ? null : tckn(i + 3), passport_no: foreign ? `P${1000000 + i}` : null, nationality: lang === 'en' ? 'GB' : lang === 'de' ? 'DE' : 'TR',
       license_expiry: day(400 + i * 200), address: foreign ? 'Hotel / turist' : `${['Kadıköy', 'Beşiktaş', 'Çankaya', 'Ataşehir'][i % 4]} / ${i % 4 === 2 ? 'Ankara' : 'İstanbul'}`,
     });
-    insertRow('consents', { customer_id: id, type: 'kvkk_notice', granted: 1, channel: 'Ofis', recorded_by: 1 });
-    if (i % 2 === 0) insertRow('consents', { customer_id: id, type: 'marketing_email', granted: 1, channel: 'Web' });
-    if (i % 3 === 0) insertRow('consents', { customer_id: id, type: 'marketing_sms', granted: 1, channel: 'Ofis', recorded_by: 1 });
+    await insertRow('consents', { customer_id: id, type: 'kvkk_notice', granted: 1, channel: 'Ofis', recorded_by: 1 });
+    if (i % 2 === 0) await insertRow('consents', { customer_id: id, type: 'marketing_email', granted: 1, channel: 'Web' });
+    if (i % 3 === 0) await insertRow('consents', { customer_id: id, type: 'marketing_sms', granted: 1, channel: 'Ofis', recorded_by: 1 });
     return id;
   });
-  const corp = insertRow('customers', {
+  const corp = await insertRow('customers', {
     type: 'corporate', first_name: 'Deniz', last_name: 'Koç', company_name: 'Örnek Lojistik A.Ş.', tax_office: 'Mecidiyeköy',
     tax_no: '1234567890', phone: '0212 999 99 99', email: 'filo@ornek.com.tr', birth_date: '1980-02-02', national_id: tckn(42),
     license_no: 'B-901234', license_date: '2000-01-01', license_class: 'B', license_expiry: day(900), credit_limit: 150000,
     invoice_title: 'Örnek Lojistik Anonim Şirketi', invoice_address: 'Mecidiyeköy Yolu Cad. No:10 Şişli/İstanbul',
   });
-  insertRow('consents', { customer_id: corp, type: 'kvkk_notice', granted: 1, channel: 'Islak imza', recorded_by: 1 });
-  insertRow('drivers', { customer_id: corp, first_name: 'Murat', last_name: 'Er', national_id: tckn(43), birth_date: '1986-05-05', phone: '0541 000 11 22', license_no: 'B-555111', license_class: 'B', license_date: '2006-01-01', license_expiry: day(700) });
-  insertRow('drivers', { customer_id: corp, first_name: 'Gül', last_name: 'Tan', national_id: tckn(44), birth_date: '1990-08-08', phone: '0541 000 33 44', license_no: 'B-555222', license_class: 'B', license_date: '2011-01-01', license_expiry: day(30) });
+  await insertRow('consents', { customer_id: corp, type: 'kvkk_notice', granted: 1, channel: 'Islak imza', recorded_by: 1 });
+  await insertRow('drivers', { customer_id: corp, first_name: 'Murat', last_name: 'Er', national_id: tckn(43), birth_date: '1986-05-05', phone: '0541 000 11 22', license_no: 'B-555111', license_class: 'B', license_date: '2006-01-01', license_expiry: day(700) });
+  await insertRow('drivers', { customer_id: corp, first_name: 'Gül', last_name: 'Tan', national_id: tckn(44), birth_date: '1990-08-08', phone: '0541 000 33 44', license_no: 'B-555222', license_class: 'B', license_date: '2011-01-01', license_expiry: day(30) });
   cIds.push(corp);
-  insertRow('customers', {
+  await insertRow('customers', {
     first_name: 'Kemal', last_name: 'Kara', phone: '0540 000 00 00', blacklisted: 1, risk_score: 90, risk_note: '2 kez geç iade, ödenmemiş hasar',
     blacklist_reason: 'Ödenmemiş hasar bedeli', birth_date: '1975-05-05', license_no: 'B-000111', license_date: '1995-01-01', national_id: tckn(45),
   });
@@ -163,13 +161,13 @@ export async function seedDemo(db: DatabaseSync) {
     extras?: ExtraSelection[]; source?: string; agency?: number; hold?: number; nps?: number;
   }
   const rentalIds: number[] = [];
-  function addRental({ v, c, from, to, status, endKmAdd = 800, fuel = 8, pay = 'full', extras = [], source = 'Ofis', agency, hold = 0, nps }: SeedRental) {
-    const vehicle = getVehicle(vIds[v]);
-    const customer = getCustomer(cIds[c]);
-    const q = calcQuote({ vehicle, pickup_at: from, return_at: to, extras, channel: source, customer });
+  async function addRental({ v, c, from, to, status, endKmAdd = 800, fuel = 8, pay = 'full', extras = [], source = 'Ofis', agency, hold = 0, nps }: SeedRental) {
+    const vehicle = await getVehicle(vIds[v]);
+    const customer = await getCustomer(cIds[c]);
+    const q = await calcQuote({ vehicle, pickup_at: from, return_at: to, extras, channel: source, customer });
     const returned = status !== 'active';
-    const agencyPct = agency ? get<{ commission_pct: number }>('SELECT commission_pct FROM agencies WHERE id = ?', agency).commission_pct : 0;
-    const id = insertRow('rentals', {
+    const agencyPct = agency ? (await get<{ commission_pct: number }>('SELECT commission_pct FROM agencies WHERE id = ?', agency)).commission_pct : 0;
+    const id = await insertRow('rentals', {
       contract_no: `TMP-${crypto.randomUUID()}`, customer_id: customer.id, vehicle_id: vehicle.id,
       pickup_branch_id: vehicle.branch_id, return_branch_id: vehicle.branch_id, pickup_at: from, planned_return_at: to,
       actual_return_at: returned ? to : null, start_km: vehicle.current_km, end_km: returned ? vehicle.current_km + endKmAdd : null,
@@ -180,24 +178,24 @@ export async function seedDemo(db: DatabaseSync) {
       language: customer.preferred_language, signed_at: from, status, created_by: uid.personel,
       closed_at: status === 'closed' ? to : null, deposit_hold_amount: hold, deposit_hold_until: hold ? day(25) : null,
     });
-    exec('UPDATE rentals SET contract_no = ? WHERE id = ?', makeCode('KS', id), id);
-    for (const l of q.extras) insertRow('rental_extras', { rental_id: id, ...l });
-    insertRow('inspection_sessions', { rental_id: id, kind: 'checkout', km: vehicle.current_km, fuel: 8, cleanliness: 'clean', started_by: uid.saha, started_at: from.replace('T', ' '), completed_at: from.replace('T', ' ') });
-    insertRow('kabis_submissions', { rental_id: id, kind: 'open', status: 'sent', attempts: 1, reference_no: `EGM-${100000 + id}`, payload: '{}', sent_at: from });
+    await exec('UPDATE rentals SET contract_no = ? WHERE id = ?', makeCode('KS', id), id);
+    for (const l of q.extras) await insertRow('rental_extras', { rental_id: id, ...l });
+    await insertRow('inspection_sessions', { rental_id: id, kind: 'checkout', km: vehicle.current_km, fuel: 8, cleanliness: 'clean', started_by: uid.saha, started_at: from.replace('T', ' '), completed_at: from.replace('T', ' ') });
+    await insertRow('kabis_submissions', { rental_id: id, kind: 'open', status: 'sent', attempts: 1, reference_no: `EGM-${100000 + id}`, payload: '{}', sent_at: from });
     if (returned) {
-      insertRow('inspection_sessions', { rental_id: id, kind: 'checkin', km: vehicle.current_km + endKmAdd, fuel, cleanliness: 'normal', started_by: uid.saha, started_at: to.replace('T', ' '), completed_at: to.replace('T', ' ') });
-      insertRow('kabis_submissions', { rental_id: id, kind: 'close', status: v === 1 && status === 'returned' ? 'pending' : 'sent', attempts: 1, reference_no: v === 1 ? null : `EGM-${200000 + id}`, payload: '{}', sent_at: to });
-      if (fuel < 8) insertRow('rental_charges', { rental_id: id, type: 'fuel', description: `Yakıt eksiği: ${8 - fuel}/8`, amount: (8 - fuel) * 350 });
-      exec('UPDATE vehicles SET current_km = ? WHERE id = ?', vehicle.current_km + endKmAdd, vehicle.id);
-    } else exec("UPDATE vehicles SET status = 'rented' WHERE id = ?", vehicle.id);
-    recalcRental(id);
-    const total = get<{ total_amount: number }>('SELECT total_amount FROM rentals WHERE id = ?', id).total_amount;
+      await insertRow('inspection_sessions', { rental_id: id, kind: 'checkin', km: vehicle.current_km + endKmAdd, fuel, cleanliness: 'normal', started_by: uid.saha, started_at: to.replace('T', ' '), completed_at: to.replace('T', ' ') });
+      await insertRow('kabis_submissions', { rental_id: id, kind: 'close', status: v === 1 && status === 'returned' ? 'pending' : 'sent', attempts: 1, reference_no: v === 1 ? null : `EGM-${200000 + id}`, payload: '{}', sent_at: to });
+      if (fuel < 8) await insertRow('rental_charges', { rental_id: id, type: 'fuel', description: `Yakıt eksiği: ${8 - fuel}/8`, amount: (8 - fuel) * 350 });
+      await exec('UPDATE vehicles SET current_km = ? WHERE id = ?', vehicle.current_km + endKmAdd, vehicle.id);
+    } else await exec("UPDATE vehicles SET status = 'rented' WHERE id = ?", vehicle.id);
+    await recalcRental(id);
+    const total = (await get<{ total_amount: number }>('SELECT total_amount FROM rentals WHERE id = ?', id)).total_amount;
     const base = { customer_id: customer.id, rental_id: id, created_by: uid.saha };
-    if (pay !== 'none') insertRow('payments', { ...base, type: 'payment', method: pay === 'full' ? 'pos' : 'cash', amount: pay === 'full' ? total : Math.round(total / 2), paid_at: from, reference: pay === 'full' ? `POS${id}${Date.now() % 10000}` : null });
-    insertRow('payments', { ...base, type: 'deposit_in', method: 'preauth', amount: q.deposit_amount, paid_at: from, reference: `PRV-${id}` });
-    if (returned && !hold) insertRow('payments', { ...base, type: 'deposit_out', method: 'preauth', amount: q.deposit_amount, paid_at: to, description: 'Provizyon kapatıldı' });
-    if (hold && returned) insertRow('payments', { ...base, type: 'deposit_out', method: 'preauth', amount: q.deposit_amount - hold, paid_at: to, description: 'Provizyon kısmi iade (HGS/ceza için tutulan hariç)' });
-    if (nps !== undefined) insertRow('nps_responses', { rental_id: id, score: nps, comment: nps >= 9 ? 'Çok hızlı teslim, teşekkürler' : nps <= 6 ? 'Teslimde bekledim' : null });
+    if (pay !== 'none') await insertRow('payments', { ...base, type: 'payment', method: pay === 'full' ? 'pos' : 'cash', amount: pay === 'full' ? total : Math.round(total / 2), paid_at: from, reference: pay === 'full' ? `POS${id}${Date.now() % 10000}` : null });
+    await insertRow('payments', { ...base, type: 'deposit_in', method: 'preauth', amount: q.deposit_amount, paid_at: from, reference: `PRV-${id}` });
+    if (returned && !hold) await insertRow('payments', { ...base, type: 'deposit_out', method: 'preauth', amount: q.deposit_amount, paid_at: to, description: 'Provizyon kapatıldı' });
+    if (hold && returned) await insertRow('payments', { ...base, type: 'deposit_out', method: 'preauth', amount: q.deposit_amount - hold, paid_at: to, description: 'Provizyon kısmi iade (HGS/ceza için tutulan hariç)' });
+    if (nps !== undefined) await insertRow('nps_responses', { rental_id: id, score: nps, comment: nps >= 9 ? 'Çok hızlı teslim, teşekkürler' : nps <= 6 ? 'Teslimde bekledim' : null });
     rentalIds.push(id);
     return id;
   }
@@ -209,35 +207,35 @@ export async function seedDemo(db: DatabaseSync) {
     const v = ((m / 8) | 0) % 11;
     const len = 2 + (m % 7);
     const src = channels[(m / 8) % channels.length | 0];
-    addRental({
+    await addRental({
       v, c: ci++ % cIds.length, from: at(-m), to: at(-m + len), status: 'closed', fuel: m % 4 === 0 ? 6 : 8, source: src,
       agency: src === 'Acente' ? ag1 : src === 'Marketplace' ? ag2 : undefined,
-      extras: m % 3 ? [] : [{ extra_id: extraId('full_coverage'), quantity: 1 }], nps: m % 2 ? 9 + (m % 2) : m % 5 ? 7 : 5,
+      extras: m % 3 ? [] : [{ extra_id: await extraId('full_coverage'), quantity: 1 }], nps: m % 2 ? 9 + (m % 2) : m % 5 ? 7 : 5,
     });
   }
   // İade alındı, depozito HGS/ceza için tutuluyor (kapanış bekliyor)
-  const heldRental = addRental({ v: 1, c: 8, from: at(-9), to: at(-2, 18), status: 'returned', hold: 2000, source: 'Web' });
+  const heldRental = await addRental({ v: 1, c: 8, from: at(-9), to: at(-2, 18), status: 'returned', hold: 2000, source: 'Web' });
   // Kapanmış ama sonradan HGS/ceza gelecek kiralama
-  const postRental = addRental({ v: 2, c: 9, from: at(-20), to: at(-15), status: 'closed', source: 'Marketplace', agency: ag2 });
+  const postRental = await addRental({ v: 2, c: 9, from: at(-20), to: at(-15), status: 'closed', source: 'Marketplace', agency: ag2 });
   // Bakiyesi açık (kısmi ödeme) kapanmamış iade
-  addRental({ v: 9, c: 5, from: at(-50), to: at(-45), status: 'returned', pay: 'half', fuel: 5 });
+  await addRental({ v: 9, c: 5, from: at(-50), to: at(-45), status: 'returned', pay: 'half', fuel: 5 });
   // Aktif kiralamalar
-  addRental({ v: 0, c: 1, from: at(-3), to: at(2), status: 'active', extras: [{ extra_id: extraId('unlimited_km'), quantity: 1 }] });
-  addRental({ v: 4, c: 2, from: at(-5), to: at(0, 18), status: 'active', pay: 'half', source: 'Telefon' });
-  addRental({ v: 7, c: 3, from: at(-10), to: at(-1), status: 'active', pay: 'half' }); // gecikmiş
-  const corpRental = addRental({ v: 5, c: cIds.indexOf(corp), from: at(-12), to: at(18), status: 'active', source: 'Kurumsal', pay: 'none' });
-  insertRow('rental_drivers', { rental_id: corpRental, driver_id: get<{ id: number }>('SELECT id FROM drivers WHERE customer_id = ? ORDER BY id LIMIT 1', corp).id });
+  await addRental({ v: 0, c: 1, from: at(-3), to: at(2), status: 'active', extras: [{ extra_id: await extraId('unlimited_km'), quantity: 1 }] });
+  await addRental({ v: 4, c: 2, from: at(-5), to: at(0, 18), status: 'active', pay: 'half', source: 'Telefon' });
+  await addRental({ v: 7, c: 3, from: at(-10), to: at(-1), status: 'active', pay: 'half' }); // gecikmiş
+  const corpRental = await addRental({ v: 5, c: cIds.indexOf(corp), from: at(-12), to: at(18), status: 'active', source: 'Kurumsal', pay: 'none' });
+  await insertRow('rental_drivers', { rental_id: corpRental, driver_id: (await get<{ id: number }>('SELECT id FROM drivers WHERE customer_id = ? ORDER BY id LIMIT 1', corp)).id });
 
   // ---------- Rezervasyonlar ----------
-  function addReservation({ v, c, category, from, to, status = 'confirmed', extras = [], source = 'Web', agency, coupon, option = false }: {
+  async function addReservation({ v, c, category, from, to, status = 'confirmed', extras = [], source = 'Web', agency, coupon, option = false }: {
     v?: number; c: number; category?: string; from: string; to: string; status?: string; extras?: ExtraSelection[]; source?: string; agency?: number; coupon?: string; option?: boolean;
   }) {
-    const vehicle = v === undefined ? null : getVehicle(vIds[v]);
-    const customer = getCustomer(cIds[c]);
-    const q = calcQuote({ vehicle, category: category ?? vehicle?.category, pickup_at: from, return_at: to, extras, channel: source, coupon_code: coupon, customer });
-    const agencyPct = agency ? get<{ commission_pct: number }>('SELECT commission_pct FROM agencies WHERE id = ?', agency).commission_pct : 0;
+    const vehicle = v === undefined ? null : await getVehicle(vIds[v]);
+    const customer = await getCustomer(cIds[c]);
+    const q = await calcQuote({ vehicle, category: category ?? vehicle?.category, pickup_at: from, return_at: to, extras, channel: source, coupon_code: coupon, customer });
+    const agencyPct = agency ? (await get<{ commission_pct: number }>('SELECT commission_pct FROM agencies WHERE id = ?', agency)).commission_pct : 0;
     const branch = vehicle?.branch_id ?? 1;
-    const id = insertRow('reservations', {
+    const id = await insertRow('reservations', {
       code: `TMP-${crypto.randomUUID()}`, customer_id: customer.id, vehicle_id: vehicle?.id ?? null, category: q.category,
       pickup_branch_id: branch, return_branch_id: branch, pickup_at: from, return_at: to, days: q.days, daily_rate: q.daily_rate,
       base_amount: q.base_amount, long_term_discount: q.long_term_discount, extras_amount: q.extras_amount, one_way_fee: 0,
@@ -246,54 +244,53 @@ export async function seedDemo(db: DatabaseSync) {
       agency_id: agency ?? null, agency_commission: Math.round(q.total_amount * agencyPct) / 100, portal_token: token(),
       option_expires_at: option ? at(0, 23, 59) : null, created_by: uid.rezervasyon,
     });
-    exec('UPDATE reservations SET code = ? WHERE id = ?', makeCode('RZ', id), id);
-    for (const l of q.extras) insertRow('reservation_extras', { reservation_id: id, ...l });
-    if (q.coupon_id) exec('UPDATE coupons SET used_count = used_count + 1 WHERE id = ?', q.coupon_id);
+    await exec('UPDATE reservations SET code = ? WHERE id = ?', makeCode('RZ', id), id);
+    for (const l of q.extras) await insertRow('reservation_extras', { reservation_id: id, ...l });
+    if (q.coupon_id) await exec('UPDATE coupons SET used_count = used_count + 1 WHERE id = ?', q.coupon_id);
     return id;
   }
-  const r1 = addReservation({ v: 1, c: 4, from: at(0, 14), to: at(3, 14), extras: [{ extra_id: extraId('Bebek Koltuğu'), quantity: 1 }] });
-  addReservation({ c: 6, category: 'Orta', from: at(0, 16, 30), to: at(4, 16, 30), source: 'Telefon' }); // grup — bugün atanacak
-  addReservation({ v: 2, c: 5, from: at(1), to: at(8), status: 'pending', option: true });
-  addReservation({ v: 6, c: 6, from: at(4), to: at(6), extras: [{ extra_id: extraId('delivery'), quantity: 1 }] });
-  addReservation({ v: 9, c: 7, from: at(7), to: at(40), coupon: 'HAFTA500' });
-  addReservation({ c: 0, category: 'SUV', from: at(2), to: at(9), source: 'Acente', agency: ag1 });
-  addReservation({ c: 8, category: 'Ekonomi', from: at(20), to: at(27), source: 'Marketplace', agency: ag2, coupon: 'ERKEN10' });
-  addReservation({ c: 3, category: 'Lüks', from: at(4, 9), to: at(6, 9), status: 'waitlist', source: 'Web' });
-  exec('INSERT INTO payments(customer_id, reservation_id, type, method, amount, paid_at, description, created_by) VALUES (?,?,?,?,?,?,?,?)',
+  const r1 = await addReservation({ v: 1, c: 4, from: at(0, 14), to: at(3, 14), extras: [{ extra_id: await extraId('Bebek Koltuğu'), quantity: 1 }] });
+  await addReservation({ c: 6, category: 'Orta', from: at(0, 16, 30), to: at(4, 16, 30), source: 'Telefon' }); // grup — bugün atanacak
+  await addReservation({ v: 2, c: 5, from: at(1), to: at(8), status: 'pending', option: true });
+  await addReservation({ v: 6, c: 6, from: at(4), to: at(6), extras: [{ extra_id: await extraId('delivery'), quantity: 1 }] });
+  await addReservation({ v: 9, c: 7, from: at(7), to: at(40), coupon: 'HAFTA500' });
+  await addReservation({ c: 0, category: 'SUV', from: at(2), to: at(9), source: 'Acente', agency: ag1 });
+  await addReservation({ c: 8, category: 'Ekonomi', from: at(20), to: at(27), source: 'Marketplace', agency: ag2, coupon: 'ERKEN10' });
+  await addReservation({ c: 3, category: 'Lüks', from: at(4, 9), to: at(6, 9), status: 'waitlist', source: 'Web' });
+  await exec('INSERT INTO payments(customer_id, reservation_id, type, method, amount, paid_at, description, created_by) VALUES (?,?,?,?,?,?,?,?)',
     cIds[4], r1, 'payment', 'credit_card', 1000, at(-2), 'Rezervasyon ön ödemesi', uid.rezervasyon);
   // Limit üstü indirim: onay bekleyen rezervasyon
-  const rDisc = addReservation({ v: 10, c: 2, from: at(10), to: at(15), status: 'pending', source: 'Ofis' });
-  exec('UPDATE reservations SET discount = 1500, total_amount = total_amount - 1500 WHERE id = ?', rDisc);
-  const ap = insertRow('approvals', { type: 'discount', entity: 'reservation', entity_id: rDisc, amount: 1500, reason: 'İndirim kullanıcı limitini (%10) aşıyor', requested_by: uid.personel });
-  exec('UPDATE reservations SET approval_id = ? WHERE id = ?', ap, rDisc);
+  const rDisc = await addReservation({ v: 10, c: 2, from: at(10), to: at(15), status: 'pending', source: 'Ofis' });
+  await exec('UPDATE reservations SET discount = 1500, total_amount = total_amount - 1500 WHERE id = ?', rDisc);
+  const ap = await insertRow('approvals', { type: 'discount', entity: 'reservation', entity_id: rDisc, amount: 1500, reason: 'İndirim kullanıcı limitini (%10) aşıyor', requested_by: uid.personel });
+  await exec('UPDATE reservations SET approval_id = ? WHERE id = ?', ap, rDisc);
 
   // ---------- Bakım, hasar, masraf ----------
-  insertRow('maintenance', { vehicle_id: vIds[3], type: 'repair', description: 'Fren balatası değişimi', start_date: day(-1), km: 67800, cost: 4500, vendor: 'Yetkili Servis', status: 'in_progress' });
-  exec("UPDATE vehicles SET status = 'maintenance' WHERE id = ?", vIds[3]);
-  insertRow('maintenance', { vehicle_id: vIds[5], type: 'periodic', description: '30.000 km bakımı', start_date: day(25), end_date: day(25), cost: 6000, vendor: 'Yetkili Servis', status: 'scheduled' });
-  insertRow('maintenance', { vehicle_id: vIds[0], type: 'tire', description: 'Kış lastiği takımı', start_date: day(-40), end_date: day(-40), cost: 12000, vendor: 'Lastikçi', status: 'completed' });
-  insertRow('damages', { vehicle_id: vIds[2], reported_at: day(-140), location: 'Sağ ön çamurluk', description: 'Çizik', severity: 'minor', repair_cost: 2500, customer_charge: 0, status: 'repaired' });
-  insertRow('damages', { vehicle_id: vIds[8], reported_at: day(-3), location: 'Arka tampon', description: 'Göçük', severity: 'moderate', repair_cost: 6000, status: 'open', mark_x: 0.5, mark_y: 0.95, mark_type: 'dent' });
+  await insertRow('maintenance', { vehicle_id: vIds[3], type: 'repair', description: 'Fren balatası değişimi', start_date: day(-1), km: 67800, cost: 4500, vendor: 'Yetkili Servis', status: 'in_progress' });
+  await exec("UPDATE vehicles SET status = 'maintenance' WHERE id = ?", vIds[3]);
+  await insertRow('maintenance', { vehicle_id: vIds[5], type: 'periodic', description: '30.000 km bakımı', start_date: day(25), end_date: day(25), cost: 6000, vendor: 'Yetkili Servis', status: 'scheduled' });
+  await insertRow('maintenance', { vehicle_id: vIds[0], type: 'tire', description: 'Kış lastiği takımı', start_date: day(-40), end_date: day(-40), cost: 12000, vendor: 'Lastikçi', status: 'completed' });
+  await insertRow('damages', { vehicle_id: vIds[2], reported_at: day(-140), location: 'Sağ ön çamurluk', description: 'Çizik', severity: 'minor', repair_cost: 2500, customer_charge: 0, status: 'repaired' });
+  await insertRow('damages', { vehicle_id: vIds[8], reported_at: day(-3), location: 'Arka tampon', description: 'Göçük', severity: 'moderate', repair_cost: 6000, status: 'open', mark_x: 0.5, mark_y: 0.95, mark_type: 'dent' });
   for (let i = 0; i < 6; i++) {
-    insertRow('expenses', { category: 'Kira', amount: 45000, expense_date: day(-30 * i - 1), description: 'Ofis kirası', created_by: uid.muhasebe });
-    insertRow('expenses', { category: 'Yıkama/Temizlik', amount: 3500, expense_date: day(-30 * i - 5), created_by: uid.muhasebe });
-    insertRow('expenses', { vehicle_id: vIds[i], category: 'Yakıt', amount: 1500, expense_date: day(-30 * i - 10), created_by: uid.muhasebe });
+    await insertRow('expenses', { category: 'Kira', amount: 45000, expense_date: day(-30 * i - 1), description: 'Ofis kirası', created_by: uid.muhasebe });
+    await insertRow('expenses', { category: 'Yıkama/Temizlik', amount: 3500, expense_date: day(-30 * i - 5), created_by: uid.muhasebe });
+    await insertRow('expenses', { vehicle_id: vIds[i], category: 'Yakıt', amount: 1500, expense_date: day(-30 * i - 10), created_by: uid.muhasebe });
   }
-  insertRow('vehicle_transfers', { vehicle_id: vIds[9], from_branch_id: b3, to_branch_id: 1, planned_at: at(1, 8), driver: 'Hasan Usta', cost: 3500, status: 'requested', notes: 'İstanbul yaz talebi', created_by: uid.filo });
+  await insertRow('vehicle_transfers', { vehicle_id: vIds[9], from_branch_id: b3, to_branch_id: 1, planned_at: at(1, 8), driver: 'Hasan Usta', cost: 3500, status: 'requested', notes: 'İstanbul yaz talebi', created_by: uid.filo });
 
   // ---------- İş emirleri ----------
-  insertRow('tasks', { type: 'delivery', title: `Adrese teslim · ${get<{ code: string }>('SELECT code FROM reservations WHERE id = ?', r1).code}`, reservation_id: r1, vehicle_id: vIds[1], branch_id: 1, assigned_to: uid.saha, due_at: at(0, 13, 30), address: 'Bağdat Cad. No:100 Kadıköy', priority: 'high', created_by: uid.rezervasyon });
-  insertRow('tasks', { type: 'wash', title: 'İç-dış yıkama', vehicle_id: vIds[10], branch_id: 1, due_at: at(0, 11), priority: 'normal', created_by: uid.saha });
-  insertRow('tasks', { type: 'roadside', title: 'Yol yardım talebi · lastik patladı', rental_id: rentalIds[rentalIds.length - 3], vehicle_id: vIds[4], due_at: at(0, 9), address: 'TEM Otoyolu Çamlıca gişeleri', priority: 'urgent', notes: 'Müşteri portal üzerinden bildirdi', created_by: null });
+  await insertRow('tasks', { type: 'delivery', title: `Adrese teslim · ${(await get<{ code: string }>('SELECT code FROM reservations WHERE id = ?', r1)).code}`, reservation_id: r1, vehicle_id: vIds[1], branch_id: 1, assigned_to: uid.saha, due_at: at(0, 13, 30), address: 'Bağdat Cad. No:100 Kadıköy', priority: 'high', created_by: uid.rezervasyon });
+  await insertRow('tasks', { type: 'wash', title: 'İç-dış yıkama', vehicle_id: vIds[10], branch_id: 1, due_at: at(0, 11), priority: 'normal', created_by: uid.saha });
+  await insertRow('tasks', { type: 'roadside', title: 'Yol yardım talebi · lastik patladı', rental_id: rentalIds[rentalIds.length - 3], vehicle_id: vIds[4], due_at: at(0, 9), address: 'TEM Otoyolu Çamlıca gişeleri', priority: 'urgent', notes: 'Müşteri portal üzerinden bildirdi', created_by: null });
 
   // ---------- NPS & mesajlar ----------
-  db.exec('COMMIT');
 
   // ---------- HGS ve cezalar (eşleştirme motoru ile) ----------
   const admin = { id: 1, username: 'admin', full_name: 'Sistem Yöneticisi', role: 'admin' as const, branch_id: null, discount_limit_pct: 100 };
   const plate = (i: number) => vehicles[i][0];
-  const post = get<{ pickup_at: string }>('SELECT pickup_at FROM rentals WHERE id = ?', postRental).pickup_at;
-  const held = get<{ pickup_at: string }>('SELECT pickup_at FROM rentals WHERE id = ?', heldRental).pickup_at;
+  const post = (await get<{ pickup_at: string }>('SELECT pickup_at FROM rentals WHERE id = ?', postRental)).pickup_at;
+  const held = (await get<{ pickup_at: string }>('SELECT pickup_at FROM rentals WHERE id = ?', heldRental)).pickup_at;
   const tr = (s: string, addH: number) => {
     const d = new Date(s);
     d.setHours(d.getHours() + addH);
@@ -309,27 +306,27 @@ export async function seedDemo(db: DatabaseSync) {
     `99 ZZZ 999;${tr(at(-4), 1)};Bilinmeyen gişe;35,00`,
   ].join('\n');
   await withContext({ user: admin, ip: '127.0.0.1', userAgent: 'seed' }, async () => {
-    importTolls(csv, admin);
+    await importTolls(csv, admin);
     // Kapanmış sözleşmeye sonradan gelen ceza (kapanış sonrası borç akışı)
-    const fine1 = insertRow('traffic_fines', { vehicle_id: vIds[2], plate: plate(2), fine_no: 'TK2025-001', violation_at: (() => { const d = new Date(post); d.setHours(d.getHours() + 8); return fmtDateTime(d); })(), type: 'speed', location: 'D100 Kartal', amount: 2167, notified_at: day(-4), discount_deadline: day(11), rental_id: postRental, customer_id: cIds[9], status: 'matched', created_by: 1 });
+    const fine1 = await insertRow('traffic_fines', { vehicle_id: vIds[2], plate: plate(2), fine_no: 'TK2025-001', violation_at: (() => { const d = new Date(post); d.setHours(d.getHours() + 8); return fmtDateTime(d); })(), type: 'speed', location: 'D100 Kartal', amount: 2167, notified_at: day(-4), discount_deadline: day(11), rental_id: postRental, customer_id: cIds[9], status: 'matched', created_by: 1 });
     void fine1;
-    insertRow('traffic_fines', { vehicle_id: vIds[0], plate: plate(0), fine_no: 'TK2025-002', violation_at: at(-2, 15), type: 'parking', location: 'Beşiktaş', amount: 1054, notified_at: day(-13), discount_deadline: day(2), status: 'new', created_by: 1 });
-    insertRow('traffic_fines', { vehicle_id: vIds[5], plate: plate(5), fine_no: 'TK2025-003', violation_at: at(-120, 11), type: 'eds', location: 'E5 Avcılar', amount: 1054, notified_at: day(-100), status: 'new', created_by: 1 });
+    await insertRow('traffic_fines', { vehicle_id: vIds[0], plate: plate(0), fine_no: 'TK2025-002', violation_at: at(-2, 15), type: 'parking', location: 'Beşiktaş', amount: 1054, notified_at: day(-13), discount_deadline: day(2), status: 'new', created_by: 1 });
+    await insertRow('traffic_fines', { vehicle_id: vIds[5], plate: plate(5), fine_no: 'TK2025-003', violation_at: at(-120, 11), type: 'eds', location: 'E5 Avcılar', amount: 1054, notified_at: day(-100), status: 'new', created_by: 1 });
     // Kapanmış kiralamaların bir kısmı için e-Arşiv faturası (PDF ile)
-    const closed = db.prepare("SELECT id FROM rentals WHERE status = 'closed' ORDER BY id DESC LIMIT 6").all() as { id: number }[];
+    const closed = await all<{ id: number }>("SELECT id FROM rentals WHERE status = 'closed' ORDER BY id DESC LIMIT 6");
     for (const r of closed) await issueInvoiceForRental(r.id, admin);
   });
   // Bakiyesi sıfırlanmış iade edilen sözleşmeleri kapat
-  for (const r of db.prepare("SELECT * FROM rentals WHERE status = 'returned'").all() as unknown as Rental[]) {
-    const f = rentalFinance(r);
-    if (Math.abs(f.balance) < 0.01 && f.deposit_held < 0.01) exec("UPDATE rentals SET status = 'closed', closed_at = actual_return_at WHERE id = ?", r.id);
+  for (const r of await all<Rental>("SELECT * FROM rentals WHERE status = 'returned'")) {
+    const f = await rentalFinance(r);
+    if (Math.abs(f.balance) < 0.01 && f.deposit_held < 0.01) await exec("UPDATE rentals SET status = 'closed', closed_at = actual_return_at WHERE id = ?", r.id);
   }
 
-  exec("UPDATE settings SET value = 'Demo Rent A Car A.Ş.' WHERE key = 'company_name'");
-  exec("UPDATE settings SET value = '0850 000 00 00' WHERE key = 'company_phone'");
-  exec("UPDATE settings SET value = 'Büyükdere Cad. No:1 Şişli / İstanbul' WHERE key = 'company_address'");
-  exec("UPDATE settings SET value = '1111111111' WHERE key = 'company_tax_no'");
-  exec("UPDATE settings SET value = 'Şişli' WHERE key = 'company_tax_office'");
-  exec("UPDATE settings SET value = 'simulate' WHERE key = 'kabis_mode'");
+  await exec("UPDATE settings SET value = 'Demo Rent A Car A.Ş.' WHERE key = 'company_name'");
+  await exec("UPDATE settings SET value = '0850 000 00 00' WHERE key = 'company_phone'");
+  await exec("UPDATE settings SET value = 'Büyükdere Cad. No:1 Şişli / İstanbul' WHERE key = 'company_address'");
+  await exec("UPDATE settings SET value = '1111111111' WHERE key = 'company_tax_no'");
+  await exec("UPDATE settings SET value = 'Şişli' WHERE key = 'company_tax_office'");
+  await exec("UPDATE settings SET value = 'simulate' WHERE key = 'kabis_mode'");
 
 }

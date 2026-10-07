@@ -46,7 +46,7 @@ export function handler<P extends Params = Params>(
   return async (req: Request, segment?: { params: Promise<P> }): Promise<Response> => {
     try {
       const token = tokenFromRequest(req);
-      const user = userFromToken(token);
+      const user = await userFromToken(token);
       if (!user || !token) throw new HttpError(401, 'Oturum açmanız gerekiyor');
       if (opts.admin) assertAdmin(user);
       if (opts.perm) assertCan(user, opts.perm);

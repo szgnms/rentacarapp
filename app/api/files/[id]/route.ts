@@ -3,10 +3,10 @@ import { audit } from '@/lib/audit';
 import { toId } from '@/lib/core';
 import { readFile, voidFile } from '@/lib/files';
 
-export const GET = handler<{ id: string }>(({ params, query }) => {
-  const { file, data, intact } = readFile(toId(params.id));
+export const GET = handler<{ id: string }>(async ({ params, query }) => {
+  const { file, data, intact } = await readFile(toId(params.id));
   // Kişisel veri içeren belgelere erişim loglanır (KVKK).
-  if (file.entity === 'customer' || file.entity === 'driver') audit('pii.file_view', file.entity, file.entity_id, { file_id: file.id });
+  if (file.entity === 'customer' || file.entity === 'driver') await audit('pii.file_view', file.entity, file.entity_id, { file_id: file.id });
   return new Response(new Uint8Array(data), {
     headers: {
       'Content-Type': file.mime,
