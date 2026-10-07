@@ -1,5 +1,7 @@
 import { HttpError } from './core';
-import { SESSION_COOKIE, assertAdmin, userFromToken } from './auth';
+import { SESSION_COOKIE, assertAdmin, assertCan, userFromToken } from './auth';
+import { contextFromHeaders, withContext } from './context';
+import type { Permission } from './permissions';
 import type { Body, SessionUser } from './types';
 
 export interface Ctx<P> {
@@ -39,7 +41,7 @@ export const created = (data: unknown) => Response.json(data, { status: 201 });
  */
 export function handler<P extends Params = Params>(
   fn: (ctx: Ctx<P>) => unknown | Promise<unknown>,
-  opts: { admin?: boolean } = {},
+  opts: { admin?: boolean; perm?: Permission; raw?: boolean } = {},
 ) {
   return async (req: Request, segment?: { params: Promise<P> }): Promise<Response> => {
     try {
@@ -47,8 +49,9 @@ export function handler<P extends Params = Params>(
       const user = userFromToken(token);
       if (!user || !token) throw new HttpError(401, 'Oturum açmanız gerekiyor');
       if (opts.admin) assertAdmin(user);
+      if (opts.perm) assertCan(user, opts.perm);
       let body: Body = {};
-      if (req.method !== 'GET' && req.method !== 'HEAD') {
+      if (!opts.raw && req.method !== 'GET' && req.method !== 'HEAD') {
         const text = await req.text();
         if (text) {
           try {
@@ -60,7 +63,32 @@ export function handler<P extends Params = Params>(
       }
       const query = Object.fromEntries(new URL(req.url).searchParams);
       const params = (segment ? await segment.params : {}) as P;
-      const result = await fn({ req, user, token, params, body, query });
+      const result = await withContext(contextFromHeaders(req.headers, user), () => fn({ req, user, token, params, body, query }));
+      return result instanceof Response ? result : Response.json(result ?? { ok: true });
+    } catch (e) {
+      return errorResponse(e);
+    }
+  };
+}
+
+/** Giriş gerektirmeyen uç noktalar (müşteri portalı). */
+export function publicHandler<P extends Params = Params>(fn: (ctx: Omit<Ctx<P>, 'user' | 'token'>) => unknown | Promise<unknown>, opts: { raw?: boolean } = {}) {
+  return async (req: Request, segment?: { params: Promise<P> }): Promise<Response> => {
+    try {
+      let body: Body = {};
+      if (!opts.raw && req.method !== 'GET' && req.method !== 'HEAD') {
+        const text = await req.text();
+        if (text) {
+          try {
+            body = JSON.parse(text);
+          } catch {
+            throw new HttpError(400, 'Geçersiz JSON');
+          }
+        }
+      }
+      const query = Object.fromEntries(new URL(req.url).searchParams);
+      const params = (segment ? await segment.params : {}) as P;
+      const result = await withContext(contextFromHeaders(req.headers, null), () => fn({ req, params, body, query }));
       return result instanceof Response ? result : Response.json(result ?? { ok: true });
     } catch (e) {
       return errorResponse(e);

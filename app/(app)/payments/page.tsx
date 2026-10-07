@@ -1,6 +1,6 @@
 import type { Metadata } from 'next';
 import Link from 'next/link';
-import { listPayments } from '@/lib/domain/bookings';
+import { listPayments } from '@/lib/domain/payments';
 import { dt, labelOptions, money, text, textOptions, todayStr } from '@/lib/format';
 import { flat, type SearchParams } from '@/lib/page';
 import { requireUser } from '@/lib/session';

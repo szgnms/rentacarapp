@@ -30,9 +30,11 @@ export function listMaintenance(f: { status?: string; vehicle_id?: string } = {}
 /** Devam eden bakım kaydına göre araç durumunu senkronize eder. */
 function syncVehicleStatus(vehicleId: number) {
   const v = one<{ status: string }>('SELECT status FROM vehicles WHERE id = ?', vehicleId);
-  if (!v || v.status === 'rented' || v.status === 'out_of_service') return;
+  if (!v || !['available', 'maintenance', 'damaged'].includes(v.status)) return;
   const open = one("SELECT 1 FROM maintenance WHERE vehicle_id = ? AND status = 'in_progress' LIMIT 1", vehicleId);
-  run('UPDATE vehicles SET status = ? WHERE id = ?', open ? 'maintenance' : 'available', vehicleId);
+  // Hasarlı araç servise girince "serviste", servis bitince "müsait" olur; açık servis yoksa hasarlı durumu korunur.
+  if (open) run("UPDATE vehicles SET status = 'maintenance' WHERE id = ?", vehicleId);
+  else if (v.status === 'maintenance') run("UPDATE vehicles SET status = 'available' WHERE id = ?", vehicleId);
 }
 
 function maintData(b: Body) {
@@ -156,7 +158,10 @@ export function deleteDamage(id: number) {
 
 // ================= MASRAFLAR =================
 
-export const EXPENSE_CATEGORIES = ['Yakıt', 'Yıkama/Temizlik', 'Vergi (MTV)', 'Sigorta', 'Kasko', 'Muayene', 'Otopark', 'Personel', 'Kira', 'Diğer'] as const;
+export const EXPENSE_CATEGORIES = [
+  'Yakıt', 'Yıkama/Temizlik', 'Vergi (MTV)', 'Sigorta', 'Kasko', 'Muayene', 'Otopark', 'Personel', 'Kira', 'Transfer', 'HGS yükleme',
+  'Trafik cezası', 'Çekici / yol yardım', 'Kredi / leasing taksiti', 'Diğer',
+] as const;
 
 export type ExpenseRow = Expense & { plate: string | null };
 

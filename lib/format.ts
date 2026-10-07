@@ -48,11 +48,18 @@ export type Tone = '' | 'ok' | 'warn' | 'danger' | 'info' | 'violet';
 type Labeled = Record<string, readonly [string, Tone]>;
 
 export const LABELS = {
-  vehicleStatus: { available: ['Müsait', 'ok'], rented: ['Kirada', 'info'], maintenance: ['Bakımda', 'warn'], out_of_service: ['Hizmet dışı', 'danger'] },
-  reservationStatus: {
-    pending: ['Beklemede', 'warn'], confirmed: ['Onaylı', 'info'], cancelled: ['İptal', 'danger'], no_show: ['Gelmedi', 'danger'], converted: ['Teslim edildi', 'ok'],
+  vehicleStatus: {
+    available: ['Müsait', 'ok'], rented: ['Kirada', 'info'], maintenance: ['Serviste', 'warn'], damaged: ['Hasarlı', 'danger'],
+    in_transfer: ['Transferde', 'violet'], for_sale: ['Satılık', ''], out_of_service: ['Hizmet dışı', 'danger'], sold: ['Satıldı', ''],
   },
-  rentalStatus: { active: ['Aktif', 'info'], completed: ['Tamamlandı', 'ok'], cancelled: ['İptal', 'danger'], overdue: ['Gecikmiş', 'danger'] },
+  reservationStatus: {
+    pending: ['Opsiyonlu / Beklemede', 'warn'], confirmed: ['Onaylı', 'info'], waitlist: ['Bekleme listesi', 'violet'],
+    cancelled: ['İptal', 'danger'], no_show: ['Gelmedi', 'danger'], converted: ['Teslim edildi', 'ok'],
+  },
+  rentalStatus: {
+    draft: ['Taslak (teslim sürüyor)', 'warn'], active: ['Aktif', 'info'], returned: ['İade alındı', 'violet'], closed: ['Kapandı', 'ok'],
+    cancelled: ['İptal', 'danger'], overdue: ['Gecikmiş', 'danger'],
+  },
   maintenanceStatus: { scheduled: ['Planlandı', 'violet'], in_progress: ['Devam ediyor', 'warn'], completed: ['Tamamlandı', 'ok'], cancelled: ['İptal', ''] },
   damageStatus: { open: ['Açık', 'danger'], repaired: ['Onarıldı', 'ok'], closed: ['Kapatıldı', ''] },
   severity: { minor: ['Hafif', ''], moderate: ['Orta', 'warn'], major: ['Ağır', 'danger'] },
@@ -63,11 +70,14 @@ export type LabelGroup = keyof typeof LABELS;
 
 export const TEXT = {
   maintenanceType: { periodic: 'Periyodik bakım', repair: 'Onarım', tire: 'Lastik', inspection: 'Muayene', damage_repair: 'Hasar onarımı', other: 'Diğer' },
-  method: { cash: 'Nakit', credit_card: 'Kredi kartı', bank_transfer: 'Havale/EFT', deposit: 'Depozitodan' },
-  chargeType: {
-    late_return: 'Geç iade', extra_km: 'Km aşımı', fuel: 'Yakıt', damage: 'Hasar', cleaning: 'Temizlik', traffic_fine: 'Trafik cezası', hgs: 'HGS/OGS', other: 'Diğer',
+  method: {
+    cash: 'Nakit', credit_card: 'Kredi kartı (sanal POS)', pos: 'Mobil POS', payment_link: 'Ödeme linki', bank_transfer: 'Havale/EFT',
+    preauth: 'Kart provizyonu', deposit: 'Depozitodan',
   },
-  role: { admin: 'Yönetici', staff: 'Personel' },
+  chargeType: {
+    late_return: 'Geç iade', extra_km: 'Km aşımı', fuel: 'Yakıt', damage: 'Hasar', cleaning: 'Temizlik', traffic_fine: 'Trafik cezası', hgs: 'HGS/OGS',
+    missing_equipment: 'Kayıp ekipman', different_branch: 'Farklı şube iadesi', service_fee: 'Hizmet bedeli', other: 'Diğer',
+  },
 } as const;
 
 export const labelText = (group: LabelGroup, key: string) => (LABELS[group] as Labeled)[key]?.[0] ?? key;
@@ -78,4 +88,7 @@ export const text = (group: keyof typeof TEXT, key: string | null | undefined) =
 export const labelOptions = (group: LabelGroup): [string, string][] => Object.entries(LABELS[group]).map(([k, v]) => [k, v[0]]);
 export const textOptions = (group: keyof typeof TEXT): [string, string][] => Object.entries(TEXT[group]);
 
-export const PAY_METHODS: [string, string][] = [['credit_card', 'Kredi kartı'], ['cash', 'Nakit'], ['bank_transfer', 'Havale/EFT']];
+export const PAY_METHODS: [string, string][] = [
+  ['credit_card', 'Kredi kartı (sanal POS)'], ['pos', 'Mobil POS'], ['cash', 'Nakit'], ['bank_transfer', 'Havale/EFT'], ['payment_link', 'Ödeme linki'],
+];
+export const DEPOSIT_METHODS: [string, string][] = [['preauth', 'Kart provizyonu'], ...PAY_METHODS];

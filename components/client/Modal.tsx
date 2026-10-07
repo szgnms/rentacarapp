@@ -58,6 +58,8 @@ export function Modal({ title, onClose, children, wide, onSubmit, submitLabel = 
       await onSubmit(formToObject(e.currentTarget), e.currentTarget);
       onClose();
     } catch (err) {
+      // keepOpen: işlem başarılı ama modal sonuç göstermek için açık kalmalı
+      if ((err as { keepOpen?: boolean })?.keepOpen) return;
       setError(err);
       ref.current?.parentElement?.scrollTo({ top: 0 });
     } finally {

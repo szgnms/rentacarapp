@@ -1,5 +1,5 @@
 import type { Metadata } from 'next';
-import { listCustomers } from '@/lib/domain/fleet';
+import { listCustomers } from '@/lib/domain/customers';
 import { customerName, money } from '@/lib/format';
 import { flat, type SearchParams } from '@/lib/page';
 import { Card, PageHead, Table, Tag } from '@/components/ui';

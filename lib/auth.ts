@@ -2,6 +2,7 @@ import crypto from 'node:crypto';
 import { one, run } from './db';
 import { HttpError } from './core';
 import { hashPassword, verifyPassword } from './password';
+import { can, type Permission } from './permissions';
 import type { SessionUser } from './types';
 
 export const SESSION_COOKIE = 'sid';
@@ -20,18 +21,22 @@ export function login(username: unknown, password: unknown): { user: SessionUser
   run('DELETE FROM sessions WHERE expires_at < ?', now.toISOString());
   run('INSERT INTO sessions(token, user_id, expires_at) VALUES (?,?,?)', token, user.id,
     new Date(now.getTime() + SESSION_MAX_AGE * 1000).toISOString());
-  return { user: { id: user.id, username: user.username, full_name: user.full_name, role: user.role }, token };
+  return { user: toSessionUser(user), token };
 }
 
 export function userFromToken(token: string | undefined | null): SessionUser | null {
   if (!token) return null;
   const row = one<SessionUser & { active: number; expires_at: string }>(
-    `SELECT u.id, u.username, u.full_name, u.role, u.active, s.expires_at
+    `SELECT u.id, u.username, u.full_name, u.role, u.branch_id, u.discount_limit_pct, u.active, s.expires_at
      FROM sessions s JOIN users u ON u.id = s.user_id WHERE s.token = ?`,
     token,
   );
   if (!row || !row.active || row.expires_at < new Date().toISOString()) return null;
-  return { id: row.id, username: row.username, full_name: row.full_name, role: row.role };
+  return toSessionUser(row);
+}
+
+function toSessionUser(u: SessionUser): SessionUser {
+  return { id: u.id, username: u.username, full_name: u.full_name, role: u.role, branch_id: u.branch_id ?? null, discount_limit_pct: u.discount_limit_pct ?? 0 };
 }
 
 export function logout(token: string) {
@@ -48,4 +53,8 @@ export function changeOwnPassword(user: SessionUser, token: string, current: unk
 
 export function assertAdmin(user: SessionUser) {
   if (user.role !== 'admin') throw new HttpError(403, 'Bu işlem için yönetici yetkisi gerekir');
+}
+
+export function assertCan(user: SessionUser, perm: Permission) {
+  if (!can(user, perm)) throw new HttpError(403, 'Bu işlem için yetkiniz yok');
 }

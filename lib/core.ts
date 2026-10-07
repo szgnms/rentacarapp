@@ -106,6 +106,8 @@ export function toId(v: unknown): number {
 
 const TABLES = new Set([
   'users', 'branches', 'extras', 'vehicles', 'customers', 'reservations', 'rentals', 'payments', 'maintenance', 'damages', 'expenses',
+  'vehicle_documents', 'vehicle_transfers', 'invoices', 'approvals', 'drivers', 'agencies', 'coupons', 'seasons', 'rate_plans', 'deposit_rules',
+  'toll_transactions', 'traffic_fines', 'tasks', 'contract_templates', 'notification_templates', 'kabis_submissions',
 ]);
 
 export function mustGet<T>(table: string, id: number, label = 'Kayıt'): T {

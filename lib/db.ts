@@ -2,6 +2,7 @@ import { DatabaseSync, type SQLInputValue } from 'node:sqlite';
 import fs from 'node:fs';
 import path from 'node:path';
 import { hashPassword } from './password';
+import { migrate } from './migrations';
 import type { Settings } from './types';
 
 const SCHEMA = `
@@ -249,22 +250,57 @@ CREATE INDEX IF NOT EXISTS idx_pay_customer ON payments(customer_id);
 export const DEFAULT_SETTINGS: Settings = {
   company_name: 'Rent A Car',
   company_phone: '',
+  company_email: '',
   company_address: '',
   company_tax_no: '',
+  company_tax_office: '',
+  company_iban: '',
   currency: 'TRY',
   grace_hours: '2',
   weekly_discount_pct: '10',
   monthly_discount_pct: '20',
   one_way_fee: '1500',
   fuel_price_per_eighth: '350',
+  fuel_price_per_liter: '45',
+  fuel_service_fee: '250',
+  cleaning_fee: '750',
   min_driver_age: '21',
   min_license_years: '2',
+  young_driver_age: '25',
+  young_driver_fee_daily: '200',
+  late_fee_mode: 'daily',
   late_fee_multiplier: '1',
+  late_fee_hourly_pct: '15',
   vat_rate: '20',
   contract_terms:
     'Kiracı, aracı teslim aldığı durumda ve belirtilen tarihte iade etmeyi kabul eder. ' +
     'Trafik cezaları, HGS/OGS geçiş ücretleri ve kiracı kusurundan doğan hasarlar kiracıya aittir. ' +
     'Araç alkollü ya da ehliyetsiz kişilerce kullanılamaz, üçüncü kişilere kiralanamaz.',
+  equipment_items: [
+    'Yangın söndürücü:600', 'Üçgen reflektör:300', 'İlk yardım çantası:350', 'Stepne:2500', 'Kriko:800',
+    'Paspas takımı:400', 'HGS etiketi:100', 'Ruhsat fotokopisi:0', 'Şarj/AUX kablosu:250',
+  ].join('\n'),
+  different_branch_fee: '1500',
+  free_cancel_hours: '48',
+  cancel_fee_pct: '20',
+  no_show_fee_days: '1',
+  option_hours: '24',
+  hgs_service_fee: '50',
+  fine_service_fee: '150',
+  hgs_low_balance: '200',
+  deposit_hold_days: '30',
+  field_payment_limit: '25000',
+  fine_discount_days: '15',
+  fine_limitation_days: '730',
+  kabis_mode: 'manual',
+  invoice_prefix: 'ARS',
+  smtp_host: '',
+  smtp_port: '587',
+  smtp_user: '',
+  smtp_pass: '',
+  smtp_from: '',
+  notify_auto: '1',
+  public_base_url: 'http://localhost:3000',
 };
 
 type Param = SQLInputValue;
@@ -281,6 +317,7 @@ export function openDb(file = process.env.DB_FILE || path.join(process.cwd(), 'd
     db.exec('PRAGMA busy_timeout = 5000;');
   }
   db.exec(SCHEMA);
+  migrate(db);
   g.__rentacarDb = db;
   bootstrap(db);
   return db;
@@ -379,4 +416,89 @@ function bootstrap(db: DatabaseSync) {
     ins.run('Mini Hasar Sigortası', 'daily', 250, null);
     ins.run('Kar Zinciri', 'per_rental', 300, null);
   }
+  // Özel davranışlı ek hizmetler (kodla tanınır)
+  const coded: [string, string, string, number][] = [
+    ['unlimited_km', 'Sınırsız km', 'daily', 300],
+    ['full_coverage', 'Tam kasko paketi (LDW/SCDW)', 'daily', 450],
+    ['delivery', 'Ofis dışı teslim / adrese teslim', 'per_rental', 750],
+    ['additional_driver', 'Ek sürücü', 'per_rental', 500],
+  ];
+  for (const [code, name, type, price] of coded) {
+    if (!db.prepare('SELECT 1 FROM extras WHERE code = ?').get(code)) {
+      const existing = db.prepare('SELECT id FROM extras WHERE name = ? AND code IS NULL').get(name === 'Ek sürücü' ? 'Ek Sürücü' : name) as { id: number } | undefined;
+      if (existing) db.prepare('UPDATE extras SET code = ? WHERE id = ?').run(code, existing.id);
+      else db.prepare('INSERT INTO extras(name, price_type, price, code) VALUES (?,?,?,?)').run(name, type, price, code);
+    }
+  }
+  if (count('SELECT COUNT(*) AS n FROM channels') === 0) {
+    const ins = db.prepare('INSERT INTO channels(code, name, markup_pct, commission_pct) VALUES (?,?,?,?)');
+    for (const [code, name, markup, comm] of [
+      ['Ofis', 'Ofis / Şube', 0, 0], ['Telefon', 'Çağrı merkezi', 0, 0], ['Web', 'Web sitesi', -5, 0],
+      ['Acente', 'Acente (B2B)', 0, 10], ['Kurumsal', 'Kurumsal sözleşme', -10, 0], ['Marketplace', 'Marketplace', 10, 15],
+    ] as [string, string, number, number][]) ins.run(code, name, markup, comm);
+  }
+  if (count('SELECT COUNT(*) AS n FROM contract_templates') === 0) {
+    const ins = db.prepare('INSERT INTO contract_templates(name, language, body) VALUES (?,?,?)');
+    for (const [lang, name, body] of CONTRACT_TEMPLATES) ins.run(name, lang, body);
+  }
+  if (count('SELECT COUNT(*) AS n FROM notification_templates') === 0) {
+    const ins = db.prepare('INSERT INTO notification_templates(code, channel, subject, body, marketing) VALUES (?,?,?,?,?)');
+    for (const t of NOTIFICATION_TEMPLATES) ins.run(t[0], t[1], t[2], t[3], t[4] ?? 0);
+  }
 }
+
+const CONTRACT_TEMPLATES: [string, string, string][] = [
+  ['tr', 'Standart kira sözleşmesi', [
+    '1. Kiracı, {{plate}} plakalı aracı {{pickup_at}} tarihinde teslim almış olup {{return_at}} tarihinde {{return_branch}} şubesine iade etmeyi kabul eder.',
+    '2. Araç teslim tutanağındaki fotoğraflar, hasar şeması, kilometre ({{start_km}}) ve yakıt ({{start_fuel}}) bilgileri taraflarca kabul edilmiştir.',
+    '3. Kira süresince oluşan trafik cezaları, HGS/OGS ve köprü-otoyol geçiş ücretleri hizmet bedeli ile birlikte kiracıya yansıtılır; sözleşme kapandıktan sonra gelen kayıtlar da bu kapsamdadır.',
+    '4. Geç iade, km aşımı ({{km_limit}}), eksik yakıt, temizlik, kayıp ekipman ve kiracı kusurundan doğan hasarlar ayrıca ücretlendirilir.',
+    '5. Araç alkollü, uyuşturucu etkisi altında veya ehliyetsiz kişilerce kullanılamaz; sözleşmede adı geçmeyen kişilere kullandırılamaz, yurt dışına çıkarılamaz.',
+    '6. Depozito ({{deposit}}) kira bitiminde mahsuplaşma sonrası iade edilir; bekleyen HGS/ceza kayıtları için en fazla {{hold_days}} gün kısmen tutulabilir.',
+    '7. Kişisel veriler 6698 sayılı KVKK kapsamında aydınlatma metnine uygun olarak işlenir; 1774 sayılı Kanun gereği kiralama bilgileri KABİS üzerinden kolluğa bildirilir.',
+  ].join('\n')],
+  ['en', 'Standard rental agreement', [
+    '1. The renter received vehicle {{plate}} on {{pickup_at}} and agrees to return it to {{return_branch}} on {{return_at}}.',
+    '2. Photos, damage diagram, odometer ({{start_km}}) and fuel ({{start_fuel}}) recorded at handover are accepted by both parties.',
+    '3. Traffic fines, toll (HGS/OGS) and bridge/motorway charges incurred during the rental are charged to the renter with a service fee, including those received after closing.',
+    '4. Late return, excess mileage ({{km_limit}}), missing fuel, cleaning, missing equipment and damages caused by the renter are charged separately.',
+    '5. The vehicle may not be driven under the influence or by unlicensed or unlisted drivers and may not leave the country.',
+    '6. The deposit ({{deposit}}) is refunded after settlement; up to {{hold_days}} days may be held for pending toll/fine records.',
+    '7. Personal data is processed under Turkish Data Protection Law (KVKK) and reported to the police via KABİS as required by Law No. 1774.',
+  ].join('\n')],
+  ['de', 'Standard-Mietvertrag', [
+    '1. Der Mieter hat das Fahrzeug {{plate}} am {{pickup_at}} übernommen und gibt es am {{return_at}} in {{return_branch}} zurück.',
+    '2. Fotos, Schadensskizze, Kilometerstand ({{start_km}}) und Tankfüllung ({{start_fuel}}) bei Übergabe werden von beiden Parteien anerkannt.',
+    '3. Verkehrsstrafen und Mautgebühren (HGS/OGS) während der Mietzeit werden zzgl. Bearbeitungsgebühr dem Mieter belastet.',
+    '4. Verspätete Rückgabe, Mehrkilometer ({{km_limit}}), fehlender Kraftstoff, Reinigung, fehlende Ausrüstung und vom Mieter verursachte Schäden werden gesondert berechnet.',
+    '5. Das Fahrzeug darf nicht unter Alkoholeinfluss, ohne Führerschein oder von nicht eingetragenen Fahrern gefahren werden.',
+    '6. Die Kaution ({{deposit}}) wird nach Abrechnung erstattet; bis zu {{hold_days}} Tage können für offene Maut-/Strafposten einbehalten werden.',
+  ].join('\n')],
+  ['ru', 'Стандартный договор аренды', [
+    '1. Арендатор получил автомобиль {{plate}} {{pickup_at}} и обязуется вернуть его {{return_at}} в отделение {{return_branch}}.',
+    '2. Фотографии, схема повреждений, пробег ({{start_km}}) и уровень топлива ({{start_fuel}}) при выдаче признаются сторонами.',
+    '3. Штрафы и платные дороги (HGS/OGS) за период аренды взимаются с арендатора вместе с сервисным сбором.',
+    '4. Поздний возврат, перепробег ({{km_limit}}), недостаток топлива, чистка, утеря оборудования и повреждения оплачиваются отдельно.',
+    '5. Запрещено управление в состоянии опьянения, без прав или лицами, не указанными в договоре.',
+    '6. Депозит ({{deposit}}) возвращается после расчёта; до {{hold_days}} дней может удерживаться для неоплаченных штрафов/HGS.',
+  ].join('\n')],
+];
+
+const NOTIFICATION_TEMPLATES: [string, string, string | null, string, number?][] = [
+  ['reservation_confirmed', 'email', 'Rezervasyonunuz onaylandı · {{code}}',
+    'Sayın {{customer_name}},\n\n{{code}} numaralı rezervasyonunuz onaylanmıştır.\nAraç grubu: {{category}}\nAlış: {{pickup_at}} · {{pickup_branch}}\nDönüş: {{return_at}} · {{return_branch}}\nToplam: {{total}}\n\nOnline check-in ve rezervasyon detayları: {{portal_url}}\n\n{{company_name}}'],
+  ['reservation_confirmed', 'sms', null, '{{company_name}}: {{code}} rezervasyonunuz onaylandi. Alis {{pickup_at}} {{pickup_branch}}. Detay: {{portal_url}}'],
+  ['pickup_reminder', 'sms', null, '{{company_name}}: Yarin {{pickup_at}} aracinizi {{pickup_branch}} subesinden teslim alacaksiniz. Online check-in: {{portal_url}}'],
+  ['contract_sent', 'email', 'Kira sözleşmeniz · {{contract_no}}',
+    'Sayın {{customer_name}},\n\n{{plate}} plakalı araç için {{contract_no}} numaralı kira sözleşmeniz ektedir.\nDönüş: {{return_at}} · {{return_branch}}\n\nSözleşme, fatura, HGS/ceza bilgileri ve yol yardım: {{portal_url}}\n\n{{company_name}}'],
+  ['contract_sent', 'whatsapp', null, '{{company_name}}: {{contract_no}} sozlesmeniz olusturuldu. Sozleşme ve yol yardim: {{portal_url}}'],
+  ['return_reminder', 'sms', null, '{{company_name}}: {{plate}} plakali aracin iadesi {{return_at}} tarihinde {{return_branch}} subesindedir. Uzatma icin: {{portal_url}}'],
+  ['late_return', 'sms', null, '{{company_name}}: {{plate}} plakali aracin iade suresi {{return_at}} itibariyla gecmistir. Gec iade ucreti uygulanmaktadir. Lutfen bizi arayin: {{company_phone}}'],
+  ['checkin_completed', 'email', 'İade tamamlandı · {{contract_no}}',
+    'Sayın {{customer_name}},\n\n{{plate}} plakalı aracın iadesi tamamlandı.\nToplam: {{total}} · Ödenen: {{paid}} · Bakiye: {{balance}}\n\nFatura ve değerlendirme anketi: {{portal_url}}\n\n{{company_name}}'],
+  ['invoice_issued', 'email', 'Faturanız · {{invoice_no}}', 'Sayın {{customer_name}},\n\n{{invoice_no}} numaralı e-Arşiv faturanız ({{total}}) ektedir.\n\n{{company_name}}'],
+  ['fine_notice', 'email', 'Trafik cezası bildirimi · {{plate}}',
+    'Sayın {{customer_name}},\n\n{{contract_no}} sözleşmesi döneminde {{plate}} plakalı araca {{violation_at}} tarihli {{amount}} tutarında trafik cezası tebliğ edilmiştir. Ceza ve hizmet bedeli hesabınıza yansıtılmıştır.\nDetay: {{portal_url}}\n\n{{company_name}}'],
+  ['hgs_notice', 'sms', null, '{{company_name}}: {{contract_no}} sozlesmesi icin {{amount}} tutarinda HGS/OGS gecisi hesabiniza yansitildi. Detay: {{portal_url}}'],
+  ['nps', 'email', 'Deneyiminizi değerlendirin', 'Sayın {{customer_name}},\n\nBizi tavsiye etme olasılığınızı 0-10 arası puanlar mısınız? {{portal_url}}\n\n{{company_name}}', 1],
+];

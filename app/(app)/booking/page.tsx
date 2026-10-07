@@ -1,7 +1,10 @@
 import type { Metadata } from 'next';
 import { listBranches, listExtras } from '@/lib/domain/admin';
-import { CATEGORIES, TRANSMISSIONS, getCustomer } from '@/lib/domain/fleet';
-import { getReservation } from '@/lib/domain/bookings';
+import { getCustomer } from '@/lib/domain/customers';
+import { TRANSMISSIONS } from '@/lib/domain/vehicles';
+import { CATEGORIES } from '@/lib/rules';
+import { getReservation } from '@/lib/domain/reservations';
+import { listAgencies, listChannels } from '@/lib/domain/pricing';
 import { flat, orNotFound, type SearchParams } from '@/lib/page';
 import { PageHead } from '@/components/ui';
 import { BookingForm } from '@/components/BookingForm';
@@ -28,6 +31,8 @@ export default async function BookingPage({ searchParams }: { searchParams: Sear
         extras={listExtras()}
         categories={CATEGORIES}
         transmissions={TRANSMISSIONS}
+        channels={listChannels()}
+        agencies={listAgencies()}
         editing={editing}
         initialMode={q.mode === 'rental' ? 'rental' : 'reservation'}
         initialVehicleId={q.vehicle_id ? Number(q.vehicle_id) : null}

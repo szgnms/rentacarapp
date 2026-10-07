@@ -11,7 +11,7 @@ export const metadata: Metadata = { title: 'Filo Takvimi' };
 const WD = ['Paz', 'Pzt', 'Sal', 'Çar', 'Per', 'Cum', 'Cmt'];
 
 function cellClass(ev: CalendarEvent, day: string) {
-  if (ev.kind === 'rental' && ev.status === 'completed') return 'ev-completed';
+  if (ev.kind === 'rental' && (ev.status === 'closed' || ev.status === 'returned')) return 'ev-completed';
   if (ev.kind === 'rental' && ev.overdue && day >= (ev.planned_return_at ?? '').slice(0, 10)) return 'ev-overdue';
   return `ev-${ev.kind}`;
 }
@@ -47,6 +47,7 @@ export default async function CalendarPage({ searchParams }: { searchParams: Sea
         <span style={{ '--c': '#fca5a5' } as React.CSSProperties}>Gecikmiş iade</span>
         <span style={{ '--c': '#fcd34d' } as React.CSSProperties}>Bakım</span>
         <span style={{ '--c': '#d1d5db' } as React.CSSProperties}>Tamamlanan</span>
+        <span style={{ '--c': '#c4b5fd' } as React.CSSProperties}>Araç atanmamış grup rezervasyonu</span>
       </div>
       <div className="card table-wrap">
         <table className="cal">
@@ -61,6 +62,24 @@ export default async function CalendarPage({ searchParams }: { searchParams: Sea
             </tr>
           </thead>
           <tbody>
+            {data.unassigned.length ? (
+              <tr className="cal-group">
+                <td className="veh">
+                  <strong>Atanmamış</strong>
+                  <div className="muted small">{data.unassigned.length} grup rezervasyonu</div>
+                </td>
+                {days.map((day) => {
+                  const list = data.unassigned.filter((x) => x.pickup_at <= `${day}T23:59` && x.return_at > `${day}T00:00`);
+                  if (!list.length) return <td key={day} />;
+                  const title = list.map((x) => `${x.code} · ${x.category} · ${x.customer_name}`).join('\n');
+                  return (
+                    <td key={day}>
+                      <Link className="cell ev-unassigned" href={`/reservations/${list[0].id}`} title={title} aria-label={title}>{list.length > 1 ? list.length : ''}</Link>
+                    </td>
+                  );
+                })}
+              </tr>
+            ) : null}
             {data.vehicles.map((v) => (
               <tr key={v.id}>
                 <td className="veh">

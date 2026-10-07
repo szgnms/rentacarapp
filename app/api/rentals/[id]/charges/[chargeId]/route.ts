@@ -1,5 +1,7 @@
 import { handler } from '@/lib/api';
 import { toId } from '@/lib/core';
-import { deleteCharge } from '@/lib/domain/bookings';
+import { removeCharge } from '@/lib/domain/agreements';
 
-export const DELETE = handler<{ id: string; chargeId: string }>(({ params }) => deleteCharge(toId(params.id), toId(params.chargeId)), { admin: true });
+export const DELETE = handler<{ id: string; chargeId: string }>(({ params, query, user }) => removeCharge(toId(params.id), toId(params.chargeId), user, query.reason), {
+  perm: 'rentals.operate',
+});

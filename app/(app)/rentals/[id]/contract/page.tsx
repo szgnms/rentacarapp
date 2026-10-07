@@ -1,6 +1,6 @@
 import type { Metadata } from 'next';
 import Link from 'next/link';
-import { getRental } from '@/lib/domain/bookings';
+import { getRental } from '@/lib/domain/agreements';
 import { getSettings } from '@/lib/db';
 import { FUEL, customerName, d, dt, money, numf, text } from '@/lib/format';
 import { orNotFound, type IdParams } from '@/lib/page';

@@ -1,12 +1,15 @@
 import type { Metadata } from 'next';
 import Link from 'next/link';
-import { getVehicle } from '@/lib/domain/fleet';
+import { DOCUMENT_TYPES, getVehicle } from '@/lib/domain/vehicles';
+import { FINE_TYPES } from '@/lib/domain/tolls';
+import { can } from '@/lib/permissions';
 import { listBranches } from '@/lib/domain/admin';
 import { addDays, fmtDate, today } from '@/lib/core';
 import { d, dt, money, numf, text } from '@/lib/format';
 import { flat, orNotFound, vehicleOptions, type IdParams, type SearchParams } from '@/lib/page';
 import { requireUser } from '@/lib/session';
-import { Badge, Card, PageHead, Stat, Table, Tabs } from '@/components/ui';
+import { Badge, Card, PageHead, Stat, Table, Tabs, Tag } from '@/components/ui';
+import { FormButton } from '@/components/client/FormButton';
 import { ClickRow } from '@/components/client/Filters';
 import { ActionButton } from '@/components/client/ActionButton';
 import { DamageButton, ExpenseButton, MaintenanceButton, VehicleButton } from '@/components/dialogs/forms';
@@ -32,6 +35,22 @@ export default async function VehiclePage({ params, searchParams }: { params: Id
     ['maintenance', `Bakım (${v.maintenance.length})`],
     ['damages', `Hasar (${v.damages.length})`],
     ['expenses', `Masraflar (${v.expenses.length})`],
+    ['documents', `Belgeler (${v.documents.length})`],
+    ['transfers', `Transfer (${v.transfers.length})`],
+    ['tolls', `HGS (${v.tolls.length})`],
+    ['fines', `Cezalar (${v.fines.length})`],
+  ];
+  const fleet = can(user, 'fleet.write');
+  const branchOpts = branches.filter((b) => b.active && b.id !== v.branch_id).map((b) => [b.id, b.name] as const);
+  const docFields = [
+    { name: 'type', label: 'Belge tipi', type: 'select' as const, options: Object.entries(DOCUMENT_TYPES), span: 6 },
+    { name: 'number', label: 'Poliçe / belge no', span: 6 },
+    { name: 'provider', label: 'Sigorta şirketi / kurum', span: 6 },
+    { name: 'cost', label: 'Bedel (₺)', type: 'number' as const, span: 6 },
+    { name: 'issued_at', label: 'Başlangıç', type: 'date' as const, span: 6 },
+    { name: 'expires_at', label: 'Bitiş', type: 'date' as const, span: 6 },
+    { name: 'file_id', label: 'Belge dosyası (PDF/fotoğraf)', type: 'file' as const, entity: 'vehicle', entityId: v.id, span: 12 },
+    { name: 'notes', label: 'Not', type: 'textarea' as const, span: 12 },
   ];
 
   return (
@@ -43,11 +62,50 @@ export default async function VehiclePage({ params, searchParams }: { params: Id
           <>
             {v.status === 'available' ? <Link className="btn primary" href={`/booking?vehicle_id=${v.id}`}>Kirala / Rezerve et</Link> : null}
             <VehicleButton vehicle={v} branches={branches}>Düzenle</VehicleButton>
-            {v.status === 'available' ? (
-              <ActionButton url={`/api/vehicles/${v.id}`} method="PUT" body={{ status: 'out_of_service' }} success="Durum güncellendi">Hizmet dışı yap</ActionButton>
+            {fleet && v.status === 'available' ? (
+              <FormButton
+                title={`${v.plate} şube transferi`}
+                url="/api/transfers"
+                extra={{ vehicle_id: v.id }}
+                success="Transfer emri oluşturuldu"
+                fields={[
+                  { name: 'to_branch_id', label: 'Hedef şube', type: 'select', options: branchOpts, required: true },
+                  { name: 'planned_at', label: 'Planlanan çıkış', type: 'datetime-local' },
+                  { name: 'driver', label: 'Transfer şoförü' },
+                  { name: 'cost', label: 'Maliyet (₺)', type: 'number' },
+                  { name: 'notes', label: 'Not', type: 'textarea', span: 12 },
+                ]}
+              >
+                🔁 Transfer
+              </FormButton>
             ) : null}
-            {v.status === 'out_of_service' ? (
-              <ActionButton url={`/api/vehicles/${v.id}`} method="PUT" body={{ status: 'available' }} success="Durum güncellendi">Hizmete al</ActionButton>
+            {fleet ? (
+              <FormButton
+                title="HGS bakiye yükleme"
+                url={`/api/vehicles/${v.id}/hgs-topup`}
+                success="HGS bakiyesi yüklendi"
+                fields={[{ name: 'amount', label: 'Tutar (₺)', type: 'number', required: true, span: 12 }]}
+                intro={<div className="muted small mb">Etiket: {v.hgs_tag_no || 'tanımsız'} · Mevcut bakiye {money(v.hgs_balance)} — tutar masraf olarak da kaydedilir.</div>}
+              >
+                HGS yükle
+              </FormButton>
+            ) : null}
+            {fleet && ['available', 'for_sale', 'out_of_service', 'damaged'].includes(v.status) ? (
+              <FormButton
+                title={`${v.plate} satışı`}
+                url={`/api/vehicles/${v.id}/sell`}
+                className="danger"
+                submitLabel="Satışı kaydet"
+                success="Araç satıldı olarak işaretlendi"
+                defaults={{ sale_price: v.depreciation?.book_value ?? '' }}
+                fields={[
+                  { name: 'sold_at', label: 'Satış tarihi', type: 'date' },
+                  { name: 'sale_price', label: 'Satış bedeli (₺)', type: 'number', required: true },
+                ]}
+                intro={v.depreciation ? <div className="alert info">Defter değeri: {money(v.depreciation.book_value)} · Aylık amortisman {money(v.depreciation.monthly)}</div> : null}
+              >
+                Sat / filodan çıkar
+              </FormButton>
             ) : null}
             {user.role === 'admin' ? (
               <ActionButton url={`/api/vehicles/${v.id}`} method="DELETE" className="danger" confirm={`${v.plate} plakalı araç silinsin mi?`} okLabel="Sil" success="Araç silindi" redirectTo="/vehicles">Sil</ActionButton>
@@ -68,15 +126,17 @@ export default async function VehiclePage({ params, searchParams }: { params: Id
               <dt>Yakıt / Vites</dt><dd>{v.fuel_type} / {v.transmission}</dd>
               <dt>Koltuk / Renk</dt><dd>{v.seats} / {v.color || '—'}</dd>
               <dt>Şasi no</dt><dd>{v.vin || '—'}</dd>
-              <dt>Şube</dt><dd>{v.branch_name || '—'}</dd>
+              {v.trim || v.acriss ? <><dt>Donanım / ACRISS</dt><dd>{v.trim || '—'} / {v.acriss || '—'}</dd></> : null}
+              <dt>Şube / otopark</dt><dd>{v.branch_name || '—'}{v.parking_spot ? ` · ${v.parking_spot}` : ''}</dd>
               <dt>Güncel km</dt><dd>{numf(v.current_km)} km</dd>
-              <dt>Sonraki bakım</dt><dd>{v.next_service_km ? `${numf(v.next_service_km)} km` : '—'}</dd>
+              <dt>Sonraki bakım</dt><dd>{v.next_service_km ? `${numf(v.next_service_km)} km` : '—'}{v.next_service_date ? ` / ${d(v.next_service_date)}` : ''}</dd>
+              <dt>HGS</dt><dd>{v.hgs_tag_no || '—'} · bakiye {money(v.hgs_balance)}</dd>
               {v.active_contract ? <><dt>Aktif sözleşme</dt><dd>{v.active_contract} (dönüş {dt(v.active_return_at)})</dd></> : null}
               {v.notes ? <><dt>Notlar</dt><dd>{v.notes}</dd></> : null}
             </dl>
           </div>
         </Card>
-        <Card title="Fiyat & belgeler">
+        <Card title="Fiyat, belgeler & değer">
           <div className="card-body">
             <dl className="kv">
               <dt>Günlük fiyat</dt><dd>{money(v.daily_rate)}</dd>
@@ -85,6 +145,10 @@ export default async function VehiclePage({ params, searchParams }: { params: Id
               <dt>Trafik sigortası</dt><dd><Expiry date={v.insurance_expiry} /></dd>
               <dt>Kasko</dt><dd><Expiry date={v.kasko_expiry} /></dd>
               <dt>Muayene</dt><dd><Expiry date={v.inspection_expiry} /></dd>
+              {v.purchase_price ? <><dt>Alış</dt><dd>{money(v.purchase_price)} · {d(v.purchase_date)} {v.financing ? `· ${({ cash: 'Peşin', loan: 'Kredi', leasing: 'Leasing' } as Record<string, string>)[v.financing] ?? v.financing}` : ''}</dd></> : null}
+              {v.monthly_installment ? <><dt>Aylık taksit</dt><dd>{money(v.monthly_installment)}</dd></> : null}
+              {v.depreciation ? <><dt>Defter değeri</dt><dd>{money(v.depreciation.book_value)} <span className="muted small">({v.depreciation.months} ay × {money(v.depreciation.monthly)})</span></dd></> : null}
+              {v.sold_at ? <><dt>Satış</dt><dd>{d(v.sold_at)} · {money(v.sale_price)}</dd></> : null}
             </dl>
           </div>
         </Card>
@@ -178,8 +242,87 @@ export default async function VehiclePage({ params, searchParams }: { params: Id
               </Table>
             </>
           ) : null}
+          {tab === 'documents' ? (
+            <>
+              {fleet ? (
+                <div className="actions mb">
+                  <FormButton title="Yeni belge" url="/api/vehicle-documents" extra={{ vehicle_id: v.id }} fields={docFields} className="sm primary" success="Belge kaydedildi">+ Belge</FormButton>
+                </div>
+              ) : null}
+              <Table cols={['Tip', 'No', 'Kurum', 'Başlangıç', 'Bitiş', ['Bedel', 'num'], 'Dosya', '']} count={v.documents.length}>
+                {v.documents.map((x) => (
+                  <tr key={x.id}>
+                    <td>{DOCUMENT_TYPES[x.type] ?? x.type}</td>
+                    <td>{x.number}</td>
+                    <td>{x.provider}</td>
+                    <td>{d(x.issued_at)}</td>
+                    <td><Expiry date={x.expires_at} /></td>
+                    <td className="num">{x.cost ? money(x.cost) : ''}</td>
+                    <td>{x.file_id ? <a href={`/api/files/${x.file_id}`} target="_blank" rel="noreferrer">📎 Aç</a> : ''}</td>
+                    <td className="right nowrap">
+                      {fleet ? (
+                        <>
+                          <FormButton title="Belge düzenle" url={`/api/vehicle-documents/${x.id}`} method="PUT" fields={docFields} defaults={{ ...x, file_id: null }} className="sm">Düzenle</FormButton>{' '}
+                          <ActionButton url={`/api/vehicle-documents/${x.id}`} method="DELETE" className="sm danger" confirm="Belge silinsin mi?" okLabel="Sil">Sil</ActionButton>
+                        </>
+                      ) : null}
+                    </td>
+                  </tr>
+                ))}
+              </Table>
+            </>
+          ) : null}
+          {tab === 'transfers' ? (
+            <Table cols={['Talep', 'Nereden', 'Nereye', 'Şoför', 'Çıkış', 'Varış', ['Km', 'num'], ['Maliyet', 'num'], 'Durum']} count={v.transfers.length}>
+              {v.transfers.map((t) => (
+                <tr key={t.id}>
+                  <td>{dt(t.planned_at || t.created_at)}</td>
+                  <td>{t.from_branch || '—'}</td>
+                  <td>{t.to_branch}</td>
+                  <td>{t.driver}</td>
+                  <td>{dt(t.departed_at)}</td>
+                  <td>{dt(t.arrived_at)}</td>
+                  <td className="num">{t.km ?? ''}</td>
+                  <td className="num">{money(t.cost)}</td>
+                  <td><Tag tone={t.status === 'completed' ? 'ok' : t.status === 'cancelled' ? '' : 'violet'}>{TRANSFER_STATUS[t.status]}</Tag></td>
+                </tr>
+              ))}
+            </Table>
+          ) : null}
+          {tab === 'tolls' ? (
+            <Table cols={['Geçiş', 'Yer', 'Sözleşme', ['Tutar', 'num'], 'Durum']} count={v.tolls.length}>
+              {v.tolls.map((t) => (
+                <tr key={t.id}>
+                  <td>{dt(t.passed_at)}</td>
+                  <td>{t.location}</td>
+                  <td>{t.contract_no || '—'}</td>
+                  <td className="num">{money(t.amount)}</td>
+                  <td><Tag>{STATUS_TR[t.status] ?? t.status}</Tag></td>
+                </tr>
+              ))}
+            </Table>
+          ) : null}
+          {tab === 'fines' ? (
+            <Table cols={['İhlal', 'Tip', 'Sözleşme', ['Tutar', 'num'], 'Durum']} count={v.fines.length}>
+              {v.fines.map((t) => (
+                <tr key={t.id}>
+                  <td>{dt(t.violation_at)}</td>
+                  <td>{FINE_TYPES[t.type] ?? t.type}</td>
+                  <td>{t.contract_no || '—'}</td>
+                  <td className="num">{money(t.amount)}</td>
+                  <td><Tag>{STATUS_TR[t.status] ?? t.status}</Tag></td>
+                </tr>
+              ))}
+            </Table>
+          ) : null}
         </div>
       </Card>
     </>
   );
 }
+
+const STATUS_TR: Record<string, string> = {
+  unmatched: 'Eşleşmedi', matched: 'Eşleşti', charged: 'Yansıtıldı', company: 'Şirket', disputed: 'İtirazlı', new: 'Yeni',
+  transferred: 'Devredildi', paid: 'Ödendi', objected: 'İtiraz', closed: 'Kapandı', cancelled: 'İptal',
+};
+const TRANSFER_STATUS: Record<string, string> = { requested: 'Talep', in_transit: 'Yolda', completed: 'Tamamlandı', cancelled: 'İptal' };

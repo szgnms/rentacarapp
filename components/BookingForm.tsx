@@ -6,11 +6,13 @@ import { api } from './client/api';
 import { ErrorBox } from './client/Modal';
 import { useToast } from './client/Toast';
 import { CustomerButton } from './dialogs/forms';
-import { FUEL_OPTIONS, Field, Options, SumRow, Tag } from './ui';
+import { Field, Options, SumRow, Tag } from './ui';
+import { ApiError } from './client/api';
 import { PAY_METHODS, addDaysStr, customerName, dt, localInput, money, numf, qs } from '@/lib/format';
 import type { Branch, Customer, CustomerListItem, Extra, Quote, Rental, Reservation } from '@/lib/types';
-import type { AvailableVehicle } from '@/lib/domain/fleet';
-import type { ReservationDetail } from '@/lib/domain/bookings';
+import type { Agency, Channel } from '@/lib/domain/pricing';
+import type { AvailableVehicle } from '@/lib/domain/vehicles';
+import type { ReservationDetail } from '@/lib/domain/reservations';
 
 type Mode = 'reservation' | 'rental';
 type SelectedCustomer = Customer & { issues?: string[] };
@@ -20,6 +22,8 @@ interface Props {
   extras: Extra[];
   categories: readonly string[];
   transmissions: readonly string[];
+  channels: Channel[];
+  agencies: Agency[];
   editing: ReservationDetail | null;
   initialMode: Mode;
   initialVehicleId: number | null;
@@ -36,7 +40,7 @@ function useDebounced<T>(value: T, ms = 250) {
   return v;
 }
 
-export function BookingForm({ branches, extras, categories, transmissions, editing, initialMode, initialVehicleId, initialCustomer }: Props) {
+export function BookingForm({ branches, extras, categories, transmissions, channels, agencies, editing, initialMode, initialVehicleId, initialCustomer }: Props) {
   const router = useRouter();
   const toast = useToast();
   const defaultBranch = branches.find((b) => b.active)?.id ?? '';
@@ -46,8 +50,11 @@ export function BookingForm({ branches, extras, categories, transmissions, editi
     return_at: editing?.return_at ?? addDaysStr(initialMode === 'rental' ? 3 : 4, 10),
     pickup_branch_id: String(editing?.pickup_branch_id ?? defaultBranch),
     return_branch_id: String(editing?.return_branch_id ?? defaultBranch),
-    category: '',
+    category: editing?.category ?? '',
     transmission: '',
+    source: editing?.source ?? 'Ofis',
+    agency_id: editing?.agency_id ? String(editing.agency_id) : '',
+    coupon_code: '',
     daily_rate: editing ? String(editing.daily_rate) : '',
     discount: editing?.discount ? String(editing.discount) : '',
     deposit_amount: editing ? String(editing.deposit_amount) : '',
@@ -57,6 +64,9 @@ export function BookingForm({ branches, extras, categories, transmissions, editi
     Object.fromEntries((editing?.extras ?? []).map((x) => [x.extra_id, x.quantity])),
   );
   const [vehicleId, setVehicleId] = useState<number | null>(editing?.vehicle_id ?? initialVehicleId);
+  // Grup rezervasyonu: araç atanmadan yalnızca araç grubu (kategori) ile
+  const [groupOnly, setGroupOnly] = useState<boolean>(!!editing && !editing.vehicle_id);
+  const [overbooking, setOverbooking] = useState(false);
   const [vehicles, setVehicles] = useState<AvailableVehicle[] | null>(null);
   const [vehiclesErr, setVehiclesErr] = useState<unknown>(null);
   const [customer, setCustomer] = useState<SelectedCustomer | null>(initialCustomer);
@@ -72,7 +82,7 @@ export function BookingForm({ branches, extras, categories, transmissions, editi
 
   // ----- Müsait araçlar -----
   // Debounce girdileri string anahtar: her render'da yeni nesne oluşup döngüye girmesin.
-  const search = useDebounced(qs({ pickup_at: f.pickup_at, return_at: f.return_at, category: f.category, transmission: f.transmission, exclude_reservation_id: editing?.id }));
+  const search = useDebounced(qs({ pickup_at: f.pickup_at, return_at: f.return_at, category: f.category, transmission: f.transmission, source: f.source, exclude_reservation_id: editing?.id }));
   useEffect(() => {
     let cancelled = false;
     api<AvailableVehicle[]>('GET', '/api/vehicles/available?' + search)
@@ -94,10 +104,16 @@ export function BookingForm({ branches, extras, categories, transmissions, editi
     };
   }, [search, toast]);
 
-  const vehicle = vehicles?.find((v) => v.id === vehicleId) ?? null;
+  const vehicle = groupOnly ? null : (vehicles?.find((v) => v.id === vehicleId) ?? null);
+  const groupMode = mode === 'reservation' && groupOnly;
+  const groupFree = groupMode && f.category ? (vehicles ?? []).filter((v) => v.category === f.category).length : null;
 
   // ----- Fiyat özeti -----
-  const quoteKey = useDebounced(vehicleId ? JSON.stringify({ ...f, vehicle_id: vehicleId, extras: extrasList }) : '', 200);
+  const quoteReady = groupMode ? !!f.category : !!vehicleId;
+  const quoteKey = useDebounced(
+    quoteReady ? JSON.stringify({ ...f, vehicle_id: groupMode ? null : vehicleId, customer_id: customer?.id, extras: extrasList }) : '',
+    200,
+  );
   useEffect(() => {
     if (!quoteKey) return setQuote(null);
     let cancelled = false;
@@ -123,17 +139,20 @@ export function BookingForm({ branches, extras, categories, transmissions, editi
 
   const switchMode = (m: Mode) => {
     setMode(m);
-    if (m === 'rental') set('pickup_at', localInput());
+    if (m === 'rental') {
+      set('pickup_at', localInput());
+      setGroupOnly(false);
+    }
   };
 
-  const submit = async (e: FormEvent<HTMLFormElement>) => {
-    e.preventDefault();
-    if (e.target !== e.currentTarget) return; // portal (yeni müşteri modalı) gönderimleri
+  const save = async (form: HTMLFormElement, waitlist = false) => {
     setError(null);
-    if (!vehicleId) return setError(new Error('Lütfen bir araç seçin'));
+    setOverbooking(false);
+    if (groupMode && !f.category) return setError(new Error('Grup rezervasyonu için araç grubu seçin'));
+    if (!groupMode && !vehicleId) return setError(new Error('Lütfen bir araç seçin'));
     if (!customer) return setError(new Error('Lütfen bir müşteri seçin'));
-    const data = Object.fromEntries(new FormData(e.currentTarget));
-    const body = { ...data, ...f, vehicle_id: vehicleId, customer_id: customer.id, extras: extrasList };
+    const data = Object.fromEntries(new FormData(form));
+    const body = { ...data, ...f, vehicle_id: groupMode ? null : vehicleId, customer_id: customer.id, extras: extrasList, waitlist };
     setBusy(true);
     try {
       if (editing) {
@@ -142,18 +161,25 @@ export function BookingForm({ branches, extras, categories, transmissions, editi
         router.push(`/reservations/${editing.id}`);
       } else if (mode === 'rental') {
         const r = await api<Rental>('POST', '/api/rentals', body);
-        toast(`Sözleşme ${r.contract_no} oluşturuldu, araç teslim edildi`);
-        router.push(`/rentals/${r.id}`);
+        toast(`Taslak sözleşme ${r.contract_no} oluşturuldu — teslim sihirbazı açılıyor`);
+        router.push(`/rentals/${r.id}/checkout`);
       } else {
         const r = await api<Reservation>('POST', '/api/reservations', body);
-        toast(`Rezervasyon ${r.code} oluşturuldu`);
+        toast(r.status === 'waitlist' ? `${r.code} bekleme listesine eklendi` : `Rezervasyon ${r.code} oluşturuldu`);
         router.push(`/reservations/${r.id}`);
       }
       router.refresh();
     } catch (err) {
       setError(err);
+      if (err instanceof ApiError && (err.details as { overbooking?: boolean } | undefined)?.overbooking) setOverbooking(true);
       setBusy(false);
     }
+  };
+
+  const submit = (e: FormEvent<HTMLFormElement>) => {
+    e.preventDefault();
+    if (e.target !== e.currentTarget) return; // portal (yeni müşteri modalı) gönderimleri
+    void save(e.currentTarget);
   };
 
   const branchOpts = branches.filter((b) => b.active).map((b) => [b.id, b.name] as const);
@@ -183,11 +209,21 @@ export function BookingForm({ branches, extras, categories, transmissions, editi
             <Field label="Dönüş şubesi" className="c3">
               <select value={f.return_branch_id} onChange={(e) => set('return_branch_id', e.target.value)}><Options list={branchOpts} empty="—" /></select>
             </Field>
-            <Field label="Kategori" className="c3">
+            <Field label="Araç grubu" className="c3">
               <select value={f.category} onChange={(e) => set('category', e.target.value)}><Options list={categories} empty="Tümü" /></select>
             </Field>
             <Field label="Vites" className="c3">
               <select value={f.transmission} onChange={(e) => set('transmission', e.target.value)}><Options list={transmissions} empty="Tümü" /></select>
+            </Field>
+            <Field label="Satış kanalı" className="c3">
+              <select value={f.source} onChange={(e) => set('source', e.target.value)}>
+                <Options list={channels.map((c) => [c.code, `${c.name}${c.markup_pct ? ` (+%${c.markup_pct})` : ''}`] as const)} />
+              </select>
+            </Field>
+            <Field label="Acente / broker" className="c3">
+              <select value={f.agency_id} onChange={(e) => set('agency_id', e.target.value)}>
+                <Options list={agencies.map((a) => [a.id, `${a.name} (%${a.commission_pct})`] as const)} empty="— Yok —" />
+              </select>
             </Field>
           </div>
         </div>
@@ -198,8 +234,23 @@ export function BookingForm({ branches, extras, categories, transmissions, editi
             <span className="muted small">{vehicles ? `${vehicles.length} müsait araç` : 'Yükleniyor…'}</span>
           </div>
           <div className="card-body">
+            {mode === 'reservation' ? (
+              <div className="tabs" style={{ marginBottom: 12 }}>
+                <button type="button" className={groupOnly ? 'active' : ''} onClick={() => setGroupOnly(true)}>Grup bazlı (araç teslimde atanır)</button>
+                <button type="button" className={!groupOnly ? 'active' : ''} onClick={() => setGroupOnly(false)}>Belirli araç</button>
+              </div>
+            ) : null}
             <ErrorBox error={vehiclesErr} />
-            <div className="vehicle-cards">
+            {groupMode ? (
+              <div className={`alert ${!f.category ? 'info' : groupFree ? 'ok' : 'warn'}`}>
+                {!f.category
+                  ? 'Yukarıdan araç grubunu seçin. Araç, teslimden önce rezervasyon ekranından atanır.'
+                  : groupFree
+                    ? `${f.category} grubunda bu tarihlerde ${groupFree} müsait araç var (atanmamış rezervasyonlar ayrıca düşülür).`
+                    : `${f.category} grubunda bu tarihlerde boş araç görünmüyor — bekleme listesine eklenebilir.`}
+              </div>
+            ) : null}
+            <div className="vehicle-cards" hidden={groupMode}>
               {vehicles?.length === 0 && !vehiclesErr ? <div className="muted">Seçilen kriterlerde müsait araç bulunamadı.</div> : null}
               {vehicles?.map((v) => (
                 <div key={v.id} className={`vcard ${v.id === vehicleId ? 'selected' : ''}`} onClick={() => setVehicleId(v.id)} role="button" tabIndex={0}
@@ -211,6 +262,7 @@ export function BookingForm({ branches, extras, categories, transmissions, editi
                   <div className="muted small">
                     {v.quote.days} gün × {money(v.daily_rate)}
                     {v.quote.long_term_discount ? ` · %${v.quote.long_term_discount_pct} uzun dönem ind.` : ''}
+                    {v.quote.rate_source === 'plan' ? ' · tarife' : ''}
                   </div>
                 </div>
               ))}
@@ -300,9 +352,10 @@ export function BookingForm({ branches, extras, categories, transmissions, editi
               <div className="muted">Tanımlı ek hizmet yok.</div>
             )}
             <div className="form-grid" style={{ marginTop: 12 }}>
-              <Field label="Özel günlük fiyat (boş = liste fiyatı)" className="c4"><input type="number" step="0.01" value={f.daily_rate} onChange={(e) => set('daily_rate', e.target.value)} /></Field>
+              <Field label="Kupon / kampanya kodu" className="c4"><input value={f.coupon_code} onChange={(e) => set('coupon_code', e.target.value.toUpperCase())} placeholder="ERKEN10" /></Field>
+              <Field label="Özel günlük fiyat (boş = tarife)" className="c4"><input type="number" step="0.01" value={f.daily_rate} onChange={(e) => set('daily_rate', e.target.value)} /></Field>
               <Field label="İndirim (₺)" className="c4"><input type="number" step="0.01" value={f.discount} onChange={(e) => set('discount', e.target.value)} /></Field>
-              <Field label="Depozito (₺, boş = araç depozitosu)" className="c4"><input type="number" step="0.01" value={f.deposit_amount} onChange={(e) => set('deposit_amount', e.target.value)} /></Field>
+              <Field label="Depozito (₺, boş = kurala göre)" className="c4"><input type="number" step="0.01" value={f.deposit_amount} onChange={(e) => set('deposit_amount', e.target.value)} /></Field>
             </div>
           </div>
         </div>
@@ -311,8 +364,7 @@ export function BookingForm({ branches, extras, categories, transmissions, editi
           <div className="card">
             <div className="card-head"><h2>5. Rezervasyon bilgileri</h2></div>
             <div className="card-body form-grid">
-              <Field label="Durum" className="c4"><select name="status" defaultValue={editing?.status ?? 'confirmed'}><Options list={[['confirmed', 'Onaylı'], ['pending', 'Beklemede']]} /></select></Field>
-              <Field label="Kaynak" className="c4"><select name="source" defaultValue={editing?.source ?? 'Ofis'}><Options list={['Ofis', 'Telefon', 'Web', 'Acente', 'Kurumsal']} /></select></Field>
+              <Field label="Durum" className="c4"><select name="status" defaultValue={editing?.status ?? 'confirmed'}><Options list={[['confirmed', 'Onaylı'], ['pending', 'Opsiyonlu (ödeme bekliyor)']]} /></select></Field>
               {!editing ? (
                 <>
                   <Field label="Ön ödeme (₺)" className="c4"><input type="number" step="0.01" name="prepayment" /></Field>
@@ -324,16 +376,14 @@ export function BookingForm({ branches, extras, categories, transmissions, editi
           </div>
         ) : (
           <div className="card">
-            <div className="card-head"><h2>5. Teslim (check-out) bilgileri</h2></div>
+            <div className="card-head"><h2>5. Teslim</h2></div>
             <div className="card-body form-grid">
-              <Field label="Çıkış km" className="c4"><input type="number" name="start_km" placeholder={vehicle ? `${vehicle.current_km} (güncel)` : "Aracın güncel km'si"} /></Field>
-              <Field label="Yakıt seviyesi" className="c4"><select name="start_fuel" defaultValue={8}><Options list={FUEL_OPTIONS} /></select></Field>
-              <Field label="Ek sürücü (ad soyad, ehliyet)" className="c4"><input name="additional_driver" /></Field>
-              <Field label="Alınan depozito (₺)" className="c3"><input type="number" step="0.01" name="deposit_collected" placeholder={vehicle ? String(vehicle.deposit_amount) : ''} /></Field>
-              <Field label="Depozito yöntemi" className="c3"><select name="deposit_method" defaultValue="credit_card"><Options list={PAY_METHODS} /></select></Field>
-              <Field label="Tahsilat (₺)" className="c3"><input type="number" step="0.01" name="payment_amount" /></Field>
-              <Field label="Tahsilat yöntemi" className="c3"><select name="payment_method" defaultValue="credit_card"><Options list={PAY_METHODS} /></select></Field>
-              <Field label="Teslim notları (hasar, aksesuar vb.)" className="c12"><textarea name="checkout_notes" /></Field>
+              <div className="c12 muted small">
+                Kaydedince taslak sözleşme oluşur ve tablet teslim sihirbazı açılır: zorunlu fotoğraflar, hasar şeması, ekipman kontrolü, km/yakıt,
+                imzalar ve depozito/ödeme adımları orada tamamlanır.
+              </div>
+              <Field label="Ek sürücü (ad soyad, ehliyet)" className="c6"><input name="additional_driver" /></Field>
+              <Field label="Not" className="c6"><input name="checkout_notes" /></Field>
             </div>
           </div>
         )}
@@ -342,21 +392,30 @@ export function BookingForm({ branches, extras, categories, transmissions, editi
       <div className="card sticky">
         <div className="card-head"><h2>Özet</h2></div>
         <div className="card-body" id="summary">
-          {!vehicle ? (
-            <div className="muted">Fiyatı görmek için bir araç seçin.</div>
+          {!quoteReady ? (
+            <div className="muted">{groupMode ? 'Fiyatı görmek için araç grubu seçin.' : 'Fiyatı görmek için bir araç seçin.'}</div>
           ) : quoteErr ? (
             <ErrorBox error={quoteErr} />
           ) : quote ? (
             <>
-              <div><strong>{vehicle.brand} {vehicle.model}</strong> <span className="muted">{vehicle.plate}</span></div>
+              <div>
+                {vehicle ? <><strong>{vehicle.brand} {vehicle.model}</strong> <span className="muted">{vehicle.plate}</span></> : <strong>{f.category} grubu</strong>}
+              </div>
+              {quote.rate_plan_name ? <div className="muted small">Tarife: {quote.rate_plan_name}</div> : null}
               <div className="muted small" style={{ marginBottom: 10 }}>{dt(f.pickup_at)} → {dt(f.return_at)}</div>
               <SumRow label={`${quote.days} gün × ${money(quote.daily_rate)}`} value={money(quote.base_amount)} />
               {quote.long_term_discount ? <SumRow label={`Uzun dönem indirimi (%${quote.long_term_discount_pct})`} value={`-${money(quote.long_term_discount)}`} /> : null}
               {quote.extras.map((x) => <SumRow key={x.extra_id} label={`${x.name}${x.quantity > 1 ? ` ×${x.quantity}` : ''}`} value={money(x.amount)} />)}
+              {quote.channel_markup ? <SumRow label={`Kanal farkı (%${quote.channel_markup_pct})`} value={money(quote.channel_markup)} /> : null}
               {quote.one_way_fee ? <SumRow label="Tek yön ücreti" value={money(quote.one_way_fee)} /> : null}
+              {quote.young_driver_fee ? <SumRow label="Genç sürücü ücreti" value={money(quote.young_driver_fee)} /> : null}
+              {quote.coupon_discount ? <SumRow label={`Kupon ${quote.coupon_code}`} value={`-${money(quote.coupon_discount)}`} /> : null}
               {quote.discount ? <SumRow label="İndirim" value={`-${money(quote.discount)}`} /> : null}
               <SumRow total label="Toplam" value={money(quote.total_amount)} />
-              <div className="muted small">Depozito: {money(f.deposit_amount !== '' ? Number(f.deposit_amount) : quote.deposit_amount)} (iade edilir) · KDV dahil</div>
+              <div className="muted small">
+                Depozito: {money(f.deposit_amount !== '' ? Number(f.deposit_amount) : quote.deposit_amount)}
+                {quote.deposit_rule ? ` (${quote.deposit_rule})` : ''} · iade edilir · KDV dahil
+              </div>
             </>
           ) : (
             <div className="muted">Hesaplanıyor…</div>
@@ -364,8 +423,19 @@ export function BookingForm({ branches, extras, categories, transmissions, editi
         </div>
         <div className="card-body" style={{ borderTop: '1px solid var(--border)' }}>
           <ErrorBox error={error} />
+          {overbooking ? (
+            <button
+              type="button"
+              className="warn"
+              style={{ width: '100%', justifyContent: 'center', marginBottom: 8 }}
+              disabled={busy}
+              onClick={(e) => void save(e.currentTarget.form!, true)}
+            >
+              Bekleme listesine ekle
+            </button>
+          ) : null}
           <button type="submit" className="primary" style={{ width: '100%', justifyContent: 'center' }} disabled={busy}>
-            {editing ? 'Değişiklikleri kaydet' : mode === 'rental' ? 'Sözleşmeyi oluştur ve teslim et' : 'Rezervasyonu oluştur'}
+            {editing ? 'Değişiklikleri kaydet' : mode === 'rental' ? 'Taslak oluştur ve teslime başla →' : 'Rezervasyonu oluştur'}
           </button>
         </div>
       </div>

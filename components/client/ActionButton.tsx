@@ -19,7 +19,7 @@ interface Props {
   reasonLabel?: string;
   okLabel?: string;
   success?: string;
-  /** Başarıdan sonra gidilecek adres (yoksa sayfa yenilenir). */
+  /** Başarıdan sonra gidilecek adres (yoksa sayfa yenilenir). "{id}" sonuç kaydının kimliğiyle değiştirilir. */
   redirectTo?: string | ((result: unknown) => string);
 }
 
@@ -33,7 +33,9 @@ export function ActionButton({ url, method = 'POST', body, children, className =
   const run = async (extra: Record<string, unknown> = {}) => {
     const result = await api(method, url, method === 'DELETE' ? undefined : { ...body, ...extra });
     if (success) toast(success);
-    if (redirectTo) router.push(typeof redirectTo === 'function' ? redirectTo(result) : redirectTo);
+    if (redirectTo) {
+      router.push(typeof redirectTo === 'function' ? redirectTo(result) : redirectTo.replace('{id}', String((result as { id?: number } | null)?.id ?? '')));
+    }
     else router.refresh();
   };
 

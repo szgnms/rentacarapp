@@ -1,6 +1,9 @@
 import type { Metadata } from 'next';
 import Link from 'next/link';
 import { dashboard } from '@/lib/domain/reports';
+import { requireUser } from '@/lib/session';
+import { can, scopedBranch } from '@/lib/permissions';
+import { flat, type SearchParams } from '@/lib/page';
 import { dt, money } from '@/lib/format';
 import { Badge, Card, PageHead, Stat, Table, Tag } from '@/components/ui';
 import { ClickRow } from '@/components/client/Filters';
@@ -10,15 +13,22 @@ export const metadata: Metadata = { title: 'Gösterge Paneli' };
 
 const MONTHS = ['Oca', 'Şub', 'Mar', 'Nis', 'May', 'Haz', 'Tem', 'Ağu', 'Eyl', 'Eki', 'Kas', 'Ara'];
 
-export default function DashboardPage() {
-  const d = dashboard();
+export default async function DashboardPage({ searchParams }: { searchParams: SearchParams }) {
+  const [user, q] = await Promise.all([requireUser(), flat(searchParams)]);
+  const d = dashboard(scopedBranch(user));
   return (
     <>
       <PageHead
         title="Gösterge Paneli"
         sub="Günün özeti ve filo durumu"
-        actions={<Link className="btn primary" href="/booking">+ Yeni kiralama / rezervasyon</Link>}
+        actions={
+          <>
+            {can(user, 'rentals.operate') ? <Link className="btn" href="/field">📱 Günün işleri</Link> : null}
+            {can(user, 'reservations.write') ? <Link className="btn primary" href="/booking">+ Yeni rezervasyon</Link> : null}
+          </>
+        }
       />
+      {q.forbidden ? <div className="alert warn">Bu sayfaya erişim yetkiniz yok.</div> : null}
       <div className="grid grid-4 mb">
         <Stat label="Filo doluluğu" value={`%${d.fleet.utilization}`} hint={`${d.fleet.rented} kirada / ${d.fleet.total} araç`} />
         <Stat
@@ -31,19 +41,19 @@ export default function DashboardPage() {
       </div>
       <div className="grid grid-4 mb">
         <Stat label="Müsait araç" value={d.fleet.available} />
-        <Stat label="Bakımda" value={d.fleet.maintenance} hint={d.fleet.out_of_service ? `${d.fleet.out_of_service} hizmet dışı` : undefined} />
+        <Stat label="Serviste / hasarlı" value={`${d.fleet.maintenance} / ${d.fleet.damaged}`} hint={[d.fleet.in_transfer ? `${d.fleet.in_transfer} transferde` : '', d.fleet.out_of_service ? `${d.fleet.out_of_service} hizmet dışı` : ''].filter(Boolean).join(' · ') || undefined} />
         <Stat label="Yaklaşan rezervasyon" value={d.counts.upcoming_reservations} hint={d.counts.pending_reservations ? `${d.counts.pending_reservations} onay bekliyor` : undefined} />
-        <Stat label="Açık hasar kaydı" value={d.counts.open_damages} hint={`${d.counts.customers} kayıtlı müşteri`} />
+        <Stat label="Açık iş emri / hasar" value={`${d.counts.open_tasks} / ${d.counts.open_damages}`} hint={d.counts.draft_rentals ? `${d.counts.draft_rentals} teslim süreci devam ediyor` : `${d.counts.customers} kayıtlı müşteri`} />
       </div>
 
       <div className="grid grid-2 mb">
         <Card title="Bugün teslim edilecekler" actions={<Link href="/reservations?status=confirmed">Tümü</Link>}>
           <Table cols={['Rezervasyon', 'Müşteri', 'Araç', 'Saat', '']} count={d.pickups_today.length} empty="Bugün teslim yok">
             {d.pickups_today.map((r) => (
-              <ClickRow key={r.id} href={`/reservations/${r.id}`}>
+              <ClickRow key={r.id} href={r.rental_id ? `/rentals/${r.rental_id}/checkout` : `/reservations/${r.id}`}>
                 <td>{r.code}</td>
                 <td>{r.customer_name}</td>
-                <td>{r.plate}<div className="muted small">{r.brand} {r.model}</div></td>
+                <td>{r.plate ?? <span className="badge warn">Araç atanmadı</span>}<div className="muted small">{r.category}</div></td>
                 <td className="nowrap">{dt(r.pickup_at)}</td>
                 <td><Badge group="reservationStatus" value={r.status} /></td>
               </ClickRow>
@@ -82,11 +92,11 @@ export default function DashboardPage() {
             {d.alerts.length ? (
               d.alerts.map((a, i) => (
                 <div key={i} className={`alert ${a.level === 'danger' ? 'danger' : 'warn'}`}>
-                  <Link href={`/vehicles/${a.vehicle_id}`}><strong>{a.plate}</strong></Link> — {a.level === 'danger' ? '⛔' : '⚠️'} {a.message}
+                  <Link href={a.href}><strong>{a.label}</strong></Link> — {a.level === 'danger' ? '⛔' : '⚠️'} {a.message}
                 </div>
               ))
             ) : (
-              <div className="muted">Sigorta, muayene ve bakım uyarısı yok.</div>
+              <div className="muted">Açık uyarı yok.</div>
             )}
           </div>
         </Card>

@@ -47,7 +47,7 @@ export function PageHead({ title, sub, actions }: { title: ReactNode; sub?: Reac
   );
 }
 
-type Col = string | [string, string];
+export type Col = string | [string, string];
 
 export function Table({ cols, children, empty = 'Kayıt bulunamadı', count }: { cols: Col[]; children: ReactNode; empty?: string; count: number }) {
   return (

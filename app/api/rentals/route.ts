@@ -1,5 +1,5 @@
 import { handler, created } from '@/lib/api';
-import { createWalkInRental, listRentals } from '@/lib/domain/bookings';
+import { listRentals, startWalkIn } from '@/lib/domain/agreements';
 
-export const GET = handler(({ query }) => listRentals(query));
-export const POST = handler(({ body, user }) => created(createWalkInRental(body, user)));
+export const GET = handler(({ query, user }) => listRentals(query, user));
+export const POST = handler(({ body, user }) => created(startWalkIn(body, user)), { perm: 'rentals.operate' });

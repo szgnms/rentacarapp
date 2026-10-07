@@ -12,7 +12,10 @@ import type { Branch, Customer, Damage, Expense, Maintenance, Vehicle } from '@/
 export const CATEGORIES = ['Ekonomi', 'Orta', 'Üst', 'SUV', 'Minivan', 'Lüks', 'Ticari'];
 export const FUEL_TYPES = ['Benzin', 'Dizel', 'LPG', 'Hibrit', 'Elektrik'];
 export const TRANSMISSIONS = ['Manuel', 'Otomatik'];
-export const EXPENSE_CATEGORIES = ['Yakıt', 'Yıkama/Temizlik', 'Vergi (MTV)', 'Sigorta', 'Kasko', 'Muayene', 'Otopark', 'Personel', 'Kira', 'Diğer'];
+export const EXPENSE_CATEGORIES = [
+  'Yakıt', 'Yıkama/Temizlik', 'Vergi (MTV)', 'Sigorta', 'Kasko', 'Muayene', 'Otopark', 'Personel', 'Kira', 'Transfer', 'HGS yükleme',
+  'Trafik cezası', 'Çekici / yol yardım', 'Kredi / leasing taksiti', 'Diğer',
+];
 
 export type VehicleOption = { id: number; label: string };
 
@@ -67,6 +70,10 @@ export function VehicleButton({ vehicle, branches, children, className }: { vehi
             <Field label="Plaka *" className="c4"><input name="plate" defaultValue={v(x.plate)} required /></Field>
             <Field label="Marka *" className="c4"><input name="brand" defaultValue={v(x.brand)} required /></Field>
             <Field label="Model *" className="c4"><input name="model" defaultValue={v(x.model)} required /></Field>
+            <Field label="Donanım paketi" className="c3"><input name="trim" defaultValue={v(x.trim)} /></Field>
+            <Field label="ACRISS kodu" className="c3"><input name="acriss" maxLength={4} defaultValue={v(x.acriss)} placeholder="CDMR" /></Field>
+            <Field label="Bagaj (adet)" className="c3"><input name="luggage" type="number" defaultValue={v(x.luggage)} /></Field>
+            <Field label="Motor no" className="c3"><input name="engine_no" defaultValue={v(x.engine_no)} /></Field>
             <Field label="Model yılı" className="c3"><input name="year" type="number" defaultValue={v(x.year)} /></Field>
             <Field label="Kategori" className="c3"><select name="category" defaultValue={x.category}><Options list={CATEGORIES} /></select></Field>
             <Field label="Yakıt" className="c3"><select name="fuel_type" defaultValue={x.fuel_type}><Options list={FUEL_TYPES} /></select></Field>
@@ -75,6 +82,16 @@ export function VehicleButton({ vehicle, branches, children, className }: { vehi
             <Field label="Renk" className="c3"><input name="color" defaultValue={v(x.color)} /></Field>
             <Field label="Şasi no" className="c3"><input name="vin" defaultValue={v(x.vin)} /></Field>
             <Field label="Şube" className="c3"><select name="branch_id" defaultValue={v(x.branch_id)}><Options list={branchOpts} empty="Seçiniz" /></select></Field>
+            <Field label="Otopark yeri" className="c3"><input name="parking_spot" defaultValue={v(x.parking_spot)} placeholder="B2-14" /></Field>
+            <Field label="Depo hacmi (lt)" className="c3"><input name="fuel_capacity" type="number" defaultValue={v(x.fuel_capacity ?? 50)} /></Field>
+            <Field label="HGS etiket no" className="c3"><input name="hgs_tag_no" defaultValue={v(x.hgs_tag_no)} /></Field>
+            {vehicle && ['available', 'out_of_service', 'damaged', 'for_sale'].includes(vehicle.status) ? (
+              <Field label="Durum" className="c3">
+                <select name="status" defaultValue={vehicle.status}>
+                  <Options list={[['available', 'Müsait'], ['out_of_service', 'Hizmet dışı'], ['damaged', 'Hasarlı'], ['for_sale', 'Satılık']]} />
+                </select>
+              </Field>
+            ) : null}
             <div className="form-section">Fiyat & kullanım</div>
             <Field label="Günlük fiyat (₺) *" className="c3"><input name="daily_rate" type="number" step="0.01" defaultValue={v(x.daily_rate)} required /></Field>
             <Field label="Depozito (₺)" className="c3"><input name="deposit_amount" type="number" step="0.01" defaultValue={v(x.deposit_amount)} /></Field>
@@ -82,10 +99,24 @@ export function VehicleButton({ vehicle, branches, children, className }: { vehi
             <Field label="Km aşım ücreti (₺/km)" className="c3"><input name="extra_km_fee" type="number" step="0.01" defaultValue={v(x.extra_km_fee)} /></Field>
             <Field label="Güncel km" className="c3"><input name="current_km" type="number" defaultValue={v(x.current_km)} /></Field>
             <Field label="Sonraki bakım km" className="c3"><input name="next_service_km" type="number" defaultValue={v(x.next_service_km)} /></Field>
-            <div className="form-section">Belgeler</div>
-            <Field label="Trafik sigortası bitiş" className="c4"><input name="insurance_expiry" type="date" defaultValue={v(x.insurance_expiry)} /></Field>
-            <Field label="Kasko bitiş" className="c4"><input name="kasko_expiry" type="date" defaultValue={v(x.kasko_expiry)} /></Field>
-            <Field label="Muayene bitiş" className="c4"><input name="inspection_expiry" type="date" defaultValue={v(x.inspection_expiry)} /></Field>
+            <Field label="Sonraki bakım tarihi" className="c3"><input name="next_service_date" type="date" defaultValue={v(x.next_service_date)} /></Field>
+            <div className="form-section">Edinim & amortisman</div>
+            <Field label="Alış tarihi" className="c3"><input name="purchase_date" type="date" defaultValue={v(x.purchase_date)} /></Field>
+            <Field label="Alış bedeli (₺)" className="c3"><input name="purchase_price" type="number" step="0.01" defaultValue={v(x.purchase_price)} /></Field>
+            <Field label="Finansman" className="c3">
+              <select name="financing" defaultValue={v(x.financing)}><Options list={[['cash', 'Peşin'], ['loan', 'Kredi'], ['leasing', 'Leasing']]} empty="—" /></select>
+            </Field>
+            <Field label="Aylık taksit (₺)" className="c3"><input name="monthly_installment" type="number" step="0.01" defaultValue={v(x.monthly_installment)} /></Field>
+            <Field label="Amortisman süresi (yıl)" className="c3"><input name="depreciation_years" type="number" step="0.5" defaultValue={v(x.depreciation_years)} /></Field>
+            <Field label="Hurda / kalıntı değer (₺)" className="c3"><input name="residual_value" type="number" step="0.01" defaultValue={v(x.residual_value)} /></Field>
+            {!vehicle ? (
+              <>
+                <div className="form-section">Belgeler (hızlı giriş — ayrıntı için araç kartı › Belgeler)</div>
+                <Field label="Trafik sigortası bitiş" className="c4"><input name="insurance_expiry" type="date" /></Field>
+                <Field label="Kasko bitiş" className="c4"><input name="kasko_expiry" type="date" /></Field>
+                <Field label="Muayene bitiş" className="c4"><input name="inspection_expiry" type="date" /></Field>
+              </>
+            ) : null}
             <Field label="Notlar" className="c12"><textarea name="notes" defaultValue={v(x.notes)} /></Field>
           </div>
         </Modal>
@@ -142,8 +173,30 @@ export function CustomerButton({
             <Field label="Ehliyet no" className="c4"><input name="license_no" defaultValue={v(x.license_no)} /></Field>
             <Field label="Sınıf" className="c4"><input name="license_class" defaultValue={v(x.license_class)} /></Field>
             <Field label="Veriliş tarihi" className="c4"><input name="license_date" type="date" defaultValue={v(x.license_date)} /></Field>
+            <Field label="Geçerlilik bitişi" className="c4"><input name="license_expiry" type="date" defaultValue={v(x.license_expiry)} /></Field>
+            <Field label="Tercih edilen dil" className="c4">
+              <select name="preferred_language" defaultValue={x.preferred_language ?? 'tr'}><Options list={[['tr', 'Türkçe'], ['en', 'English'], ['de', 'Deutsch'], ['ru', 'Русский']]} /></select>
+            </Field>
             <Field label="Adres" className="c12"><textarea name="address" defaultValue={v(x.address)} /></Field>
-            <div className="form-section">Durum</div>
+            {type === 'corporate' ? (
+              <>
+                <div className="form-section">Kurumsal cari</div>
+                <Field label="Kredi limiti (₺)" className="c4"><input name="credit_limit" type="number" step="0.01" defaultValue={v(x.credit_limit)} /></Field>
+                <Field label="Fatura unvanı" className="c4"><input name="invoice_title" defaultValue={v(x.invoice_title)} /></Field>
+                <Field label="Fatura adresi" className="c4"><input name="invoice_address" defaultValue={v(x.invoice_address)} /></Field>
+              </>
+            ) : null}
+            {!customer ? (
+              <>
+                <div className="form-section">KVKK aydınlatma & açık rıza</div>
+                <label className="check c4"><input type="checkbox" name="consent_kvkk_notice" defaultChecked /> Aydınlatma metni okundu</label>
+                <label className="check c4"><input type="checkbox" name="consent_marketing_sms" /> SMS ile pazarlama</label>
+                <label className="check c4"><input type="checkbox" name="consent_marketing_email" /> E-posta ile pazarlama</label>
+              </>
+            ) : null}
+            <div className="form-section">Risk & durum</div>
+            <Field label="Risk puanı (0-100)" className="c4"><input name="risk_score" type="number" min={0} max={100} defaultValue={v(x.risk_score ?? 0)} /></Field>
+            <Field label="Risk notu" className="c8"><input name="risk_note" defaultValue={v(x.risk_note)} /></Field>
             <label className="check c4"><input type="checkbox" name="blacklisted" defaultChecked={!!x.blacklisted} /> Kara listede</label>
             <Field label="Kara liste nedeni" className="c8"><input name="blacklist_reason" defaultValue={v(x.blacklist_reason)} /></Field>
             <Field label="Notlar" className="c12"><textarea name="notes" defaultValue={v(x.notes)} /></Field>

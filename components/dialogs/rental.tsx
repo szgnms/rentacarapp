@@ -1,21 +1,20 @@
 'use client';
 
-import { useCallback, useEffect, useRef, useState, type ReactNode } from 'react';
+import { useCallback, useEffect, useState, type ReactNode } from 'react';
 import { useRouter } from 'next/navigation';
 import { api } from '../client/api';
-import { ErrorBox, Modal } from '../client/Modal';
+import { Modal } from '../client/Modal';
 import { useToast } from '../client/Toast';
-import { FUEL_OPTIONS, Field, Options, SumRow } from '../ui';
-import { FUEL, PAY_METHODS, customerName, dt, labelOptions, localInput, money, numf, qs, text, textOptions } from '@/lib/format';
-import type { Branch, Customer, Rental, Vehicle } from '@/lib/types';
-import type { CheckinCalc } from '@/lib/rules';
+import { Field, Options, Tag } from '../ui';
+import { DEPOSIT_METHODS, PAY_METHODS, dt, localInput, money, numf, textOptions } from '@/lib/format';
+import type { Rental, Vehicle } from '@/lib/types';
 
 function useOpen() {
   const [open, setOpen] = useState(false);
   return { open, show: () => setOpen(true), hide: useCallback(() => setOpen(false), []) };
 }
 
-// ---------------- Ödeme ----------------
+// ---------------- Ödeme / iade / depozito ----------------
 
 interface PaymentCtx {
   rental_id?: number;
@@ -32,7 +31,7 @@ export function PaymentButton({ ctx, children, className }: { ctx: PaymentCtx; c
   const toast = useToast();
   const suggested = Math.max(0, Math.round(ctx.balance * 100) / 100);
   const types: [string, string][] = ctx.rental_id
-    ? [['payment', 'Tahsilat'], ['refund', 'Müşteriye iade'], ['deposit_in', 'Depozito al'], ['deposit_out', 'Depozito iade et']]
+    ? [['payment', 'Tahsilat'], ['refund', 'Müşteriye iade'], ['deposit_in', 'Depozito / provizyon al'], ['deposit_out', 'Depozito iadesi / provizyon kapat']]
     : [['payment', 'Ön ödeme tahsilatı'], ['refund', 'Müşteriye iade']];
   const amountFor = (t: string) => {
     if (t === 'payment') return suggested;
@@ -40,13 +39,14 @@ export function PaymentButton({ ctx, children, className }: { ctx: PaymentCtx; c
     if (t === 'deposit_out') return ctx.deposit_held ?? 0;
     return ctx.balance < 0 ? -ctx.balance : 0;
   };
-  const [amount, setAmount] = useState(String(suggested || ''));
+  const [amount, setAmount] = useState('');
+  const [type, setType] = useState('payment');
   return (
     <>
       <button
         className={className}
         onClick={() => {
-          // Bakiye sayfa yenilendikçe değişir; her açılışta güncel değerle başla.
+          setType('payment');
           setAmount(String(suggested || ''));
           dlg.show();
         }}
@@ -58,24 +58,30 @@ export function PaymentButton({ ctx, children, className }: { ctx: PaymentCtx; c
           title="Ödeme işlemi"
           onClose={dlg.hide}
           onSubmit={async (d) => {
-            await api('POST', '/api/payments', { ...d, rental_id: ctx.rental_id, reservation_id: ctx.reservation_id });
-            toast('Ödeme kaydedildi');
+            const res = await api<{ approval: { id: number } | null }>('POST', '/api/payments', { ...d, rental_id: ctx.rental_id, reservation_id: ctx.reservation_id });
+            toast(res.approval ? 'Depozito iadesi için onay talebi oluşturuldu' : 'Ödeme kaydedildi');
             router.refresh();
           }}
         >
           <div className="form-grid">
             <Field label="İşlem">
-              <select name="type" defaultValue="payment" onChange={(e) => setAmount(String(amountFor(e.target.value) || ''))}>
+              <select name="type" value={type} onChange={(e) => (setType(e.target.value), setAmount(String(amountFor(e.target.value) || '')))}>
                 <Options list={types} />
               </select>
             </Field>
-            <Field label="Yöntem"><select name="method" defaultValue="credit_card"><Options list={PAY_METHODS} /></select></Field>
+            <Field label="Yöntem">
+              <select name="method" defaultValue="pos" key={type}>
+                <Options list={type === 'deposit_in' || type === 'deposit_out' ? DEPOSIT_METHODS : PAY_METHODS} />
+              </select>
+            </Field>
             <Field label="Tutar (₺)"><input type="number" step="0.01" name="amount" value={amount} onChange={(e) => setAmount(e.target.value)} required /></Field>
             <Field label="Tarih"><input type="datetime-local" name="paid_at" defaultValue={localInput()} /></Field>
+            <Field label="Taksit"><input type="number" name="installments" min={1} max={12} placeholder="Tek çekim" /></Field>
+            <Field label="POS / provizyon referansı"><input name="reference" /></Field>
             <Field label="Açıklama" className="c12"><input name="description" /></Field>
             <div className="c12 muted small">
               Kalan bakiye: {money(ctx.balance)}
-              {ctx.rental_id ? ` · Tutulan depozito: ${money(ctx.deposit_held)}` : ''}
+              {ctx.rental_id ? ` · Tutulan depozito: ${money(ctx.deposit_held)}` : ''} · Kart verisi saklanmaz; yalnızca POS onay referansı kaydedilir.
             </div>
           </div>
         </Modal>
@@ -109,7 +115,7 @@ export function ExtendButton({ rental }: { rental: Rental }) {
             <Field label="Yeni dönüş tarihi"><input type="datetime-local" name="return_at" defaultValue={rental.planned_return_at} required /></Field>
             <Field label="Günlük fiyat (₺)"><input type="number" step="0.01" name="daily_rate" defaultValue={rental.daily_rate} /></Field>
           </div>
-          <div className="muted small">Araç müsaitliği kontrol edilir; gün sayısı, ek hizmetler ve toplam tutar yeniden hesaplanır.</div>
+          <div className="muted small">Araç müsaitliği kontrol edilir; gün sayısı, ek hizmetler ve toplam yeniden hesaplanır.</div>
         </Modal>
       ) : null}
     </>
@@ -118,13 +124,13 @@ export function ExtendButton({ rental }: { rental: Rental }) {
 
 // ---------------- Ek ücret ----------------
 
-export function ChargeButton({ rentalId }: { rentalId: number }) {
+export function ChargeButton({ rentalId, post }: { rentalId: number; post?: boolean }) {
   const dlg = useOpen();
   const router = useRouter();
   const toast = useToast();
   return (
     <>
-      <button onClick={dlg.show}>Ek ücret</button>
+      <button onClick={dlg.show}>{post ? 'Kapanış sonrası ücret' : 'Ek ücret'}</button>
       {dlg.open ? (
         <Modal
           title="Ek ücret ekle"
@@ -146,79 +152,68 @@ export function ChargeButton({ rentalId }: { rentalId: number }) {
   );
 }
 
-// ---------------- Teslim (rezervasyondan) ----------------
-
-interface CheckoutProps {
-  reservation: { id: number; code: string; vehicle_id: number; plate: string; pickup_at: string; return_at: string; total_amount: number; deposit_amount: number; paid: number };
-  vehicle: Vehicle;
-  customer: Customer;
-  issues: string[];
-}
-
-export function CheckoutButton({ reservation: r, vehicle: v, customer, issues }: CheckoutProps) {
+/** Ücret kaldırma: onay yetkisi yoksa ücret affı talebi oluşur. */
+export function RemoveChargeButton({ rentalId, chargeId, canApprove }: { rentalId: number; chargeId: number; canApprove: boolean }) {
   const dlg = useOpen();
   const router = useRouter();
   const toast = useToast();
-  const [alts, setAlts] = useState<Vehicle[]>([]);
-  const [km, setKm] = useState(String(v.current_km));
-  const balance = Math.max(0, r.total_amount - r.paid);
-
-  useEffect(() => {
-    if (!dlg.open) return;
-    api<Vehicle[]>('GET', '/api/vehicles/available?' + qs({ pickup_at: localInput(), return_at: r.return_at, exclude_reservation_id: r.id }))
-      .then((list) => setAlts(list.filter((a) => a.id !== v.id && a.status === 'available')))
-      .catch(() => setAlts([]));
-  }, [dlg.open, r.id, r.return_at, v.id]);
-
   return (
     <>
-      <button className="success" onClick={dlg.show}>🔑 Aracı teslim et</button>
+      <button type="button" className="sm x" title={canApprove ? 'Ücreti kaldır' : 'Ücret affı talep et'} onClick={dlg.show}>×</button>
       {dlg.open ? (
         <Modal
-          title={`Araç teslimi · ${r.code}`}
-          wide
-          submitLabel="Teslim et ve sözleşme oluştur"
-          submitClass="success"
+          title={canApprove ? 'Ücret kaldırılsın mı?' : 'Ücret affı talebi'}
+          submitLabel={canApprove ? 'Kaldır' : 'Onaya gönder'}
           onClose={dlg.hide}
           onSubmit={async (d) => {
-            const rental = await api<Rental>('POST', `/api/reservations/${r.id}/checkout`, d);
-            toast(`Sözleşme ${rental.contract_no} oluşturuldu`);
-            router.push(`/rentals/${rental.id}`);
+            const res = await api<{ approval_requested?: boolean }>('DELETE', `/api/rentals/${rentalId}/charges/${chargeId}?reason=${encodeURIComponent(String(d.reason ?? ''))}`);
+            toast(res.approval_requested ? 'Ücret affı onaya gönderildi' : 'Ücret kaldırıldı');
+            router.refresh();
           }}
         >
-          {issues.length ? (
-            <div className="alert warn">
-              Müşteri kaydında eksik/uygunsuz bilgi var; teslimden önce <a href={`/customers/${customer.id}`}>müşteri kartını</a> güncelleyin:
-              <ul>{issues.map((i) => <li key={i}>{i}</li>)}</ul>
-            </div>
-          ) : null}
-          {v.status !== 'available' ? (
-            <div className="alert danger">Rezerve edilen araç şu an müsait değil. Aşağıdan farklı bir araç seçebilirsiniz.</div>
-          ) : null}
-          <div className="alert info">
-            {customerName(customer)} · {r.plate} · {dt(r.pickup_at)} → {dt(r.return_at)} · Toplam {money(r.total_amount)}
-          </div>
+          <Field label="Gerekçe"><input name="reason" required /></Field>
+        </Modal>
+      ) : null}
+    </>
+  );
+}
+
+// ---------------- İkame araç ----------------
+
+export function SwapButton({ rental }: { rental: Rental }) {
+  const dlg = useOpen();
+  const router = useRouter();
+  const toast = useToast();
+  const [list, setList] = useState<Vehicle[]>([]);
+  useEffect(() => {
+    if (!dlg.open) return;
+    api<Vehicle[]>('GET', `/api/vehicles/available?pickup_at=${encodeURIComponent(localInput())}&return_at=${encodeURIComponent(rental.planned_return_at)}`)
+      .then((l) => setList(l.filter((v) => v.status === 'available')))
+      .catch(() => setList([]));
+  }, [dlg.open, rental.planned_return_at]);
+  return (
+    <>
+      <button onClick={dlg.show}>İkame araç</button>
+      {dlg.open ? (
+        <Modal
+          title="İkame araç ver"
+          onClose={dlg.hide}
+          submitLabel="Aracı değiştir"
+          onSubmit={async (d) => {
+            await api('POST', `/api/rentals/${rental.id}/swap`, d);
+            toast('Sözleşmedeki araç değiştirildi');
+            router.refresh();
+          }}
+        >
           <div className="form-grid">
-            <Field label="Teslim zamanı" className="c4"><input type="datetime-local" name="pickup_at" defaultValue={localInput()} /></Field>
-            <Field label="Araç (değişim / upgrade)" className="c8">
-              <select
-                name="vehicle_id"
-                defaultValue={v.id}
-                onChange={(e) => setKm(String([v, ...alts].find((a) => a.id === Number(e.target.value))?.current_km ?? v.current_km))}
-              >
-                <option value={v.id}>{v.plate} · {v.brand} {v.model}</option>
-                {alts.map((a) => <option key={a.id} value={a.id}>{a.plate} · {a.brand} {a.model} ({a.category})</option>)}
+            <Field label="İkame araç" className="c12">
+              <select name="vehicle_id" required>
+                <Options list={list.map((v) => [v.id, `${v.plate} · ${v.brand} ${v.model} (${v.category}) · ${numf(v.current_km)} km`] as const)} empty="Araç seçin" />
               </select>
             </Field>
-            <Field label="Çıkış km" className="c4"><input type="number" name="start_km" value={km} onChange={(e) => setKm(e.target.value)} /></Field>
-            <Field label="Yakıt seviyesi" className="c4"><select name="start_fuel" defaultValue={8}><Options list={FUEL_OPTIONS} /></select></Field>
-            <Field label="Ek sürücü" className="c4"><input name="additional_driver" /></Field>
-            <div className="form-section">Tahsilat</div>
-            <Field label="Alınan depozito (₺)" className="c3"><input type="number" step="0.01" name="deposit_collected" defaultValue={r.deposit_amount} /></Field>
-            <Field label="Depozito yöntemi" className="c3"><select name="deposit_method" defaultValue="credit_card"><Options list={PAY_METHODS} /></select></Field>
-            <Field label={`Tahsilat (₺) · kalan ${money(balance)}`} className="c3"><input type="number" step="0.01" name="payment_amount" defaultValue={balance || ''} /></Field>
-            <Field label="Tahsilat yöntemi" className="c3"><select name="payment_method" defaultValue="credit_card"><Options list={PAY_METHODS} /></select></Field>
-            <Field label="Teslim notları (mevcut hasarlar, aksesuarlar)" className="c12"><textarea name="checkout_notes" /></Field>
+            <Field label="Eski aracın son km'si"><input type="number" name="old_vehicle_km" /></Field>
+            <Field label="Eski araç durumu"><select name="old_vehicle_status" defaultValue="maintenance"><Options list={[['maintenance', 'Servise'], ['damaged', 'Hasarlı'], ['available', 'Müsait']]} /></select></Field>
+            <Field label="Neden" className="c12"><input name="reason" placeholder="Arıza / kaza / müşteri talebi" /></Field>
           </div>
         </Modal>
       ) : null}
@@ -226,179 +221,43 @@ export function CheckoutButton({ reservation: r, vehicle: v, customer, issues }:
   );
 }
 
-// ---------------- İade (check-in) ----------------
+// ---------------- Grup rezervasyonuna araç atama ----------------
 
-type DynRow = Record<string, string> & { key: string };
-const AUTO_CHARGES = ['late_return', 'extra_km', 'fuel', 'damage'];
-
-export function CheckinButton({ rental: r, vehicle, branches }: { rental: Rental; vehicle: Vehicle; branches: Branch[] }) {
+export function AssignButton({ reservationId, current }: { reservationId: number; current: number | null }) {
   const dlg = useOpen();
   const router = useRouter();
   const toast = useToast();
-  const formRef = useRef<HTMLDivElement>(null);
-  const [damages, setDamages] = useState<DynRow[]>([]);
-  const [charges, setCharges] = useState<DynRow[]>([]);
-  const [preview, setPreview] = useState<CheckinCalc | null>(null);
-  const [previewErr, setPreviewErr] = useState<unknown>(null);
-  const [tick, setTick] = useState(0);
-  const bump = () => setTick((t) => t + 1);
-
-  const collect = useCallback((): Record<string, unknown> => {
-    const form = formRef.current?.closest('form');
-    if (!form) return {};
-    const data: Record<string, unknown> = {};
-    for (const el of Array.from(form.elements) as HTMLInputElement[]) {
-      if (!el.name) continue;
-      data[el.name] = el.type === 'checkbox' ? el.checked : el.value;
-    }
-    const strip = ({ key: _k, ...rest }: DynRow) => rest;
-    return { ...data, damages: damages.map(strip), extra_charges: charges.map(strip) };
-  }, [damages, charges]);
-
+  const [opts, setOpts] = useState<{ category: string; same: Vehicle[]; upgrades: Vehicle[] } | null>(null);
   useEffect(() => {
-    if (!dlg.open) return;
-    const data = collect();
-    if (!data.end_km) {
-      setPreview(null);
-      return;
-    }
-    const t = setTimeout(() => {
-      api<CheckinCalc>('POST', `/api/rentals/${r.id}/checkin-preview`, data)
-        .then((p) => {
-          setPreview(p);
-          setPreviewErr(null);
-        })
-        .catch((e) => {
-          setPreview(null);
-          setPreviewErr(e);
-        });
-    }, 300);
-    return () => clearTimeout(t);
-  }, [tick, damages, charges, dlg.open, collect, r.id]);
-
-  const updateRow = (set: typeof setDamages, key: string, k: string, val: string) =>
-    set((rows) => rows.map((row) => (row.key === key ? { ...row, [k]: val } : row)));
-  const branchOpts = branches.filter((b) => b.active || b.id === r.return_branch_id).map((b) => [b.id, b.name] as const);
-
+    if (dlg.open) api<typeof opts>('GET', `/api/reservations/${reservationId}/assignment`).then(setOpts).catch(() => setOpts(null));
+  }, [dlg.open, reservationId]);
   return (
     <>
-      <button className="success" onClick={dlg.show}>↩︎ İade al</button>
+      <button onClick={dlg.show}>{current ? 'Aracı değiştir' : '🚗 Araç ata'}</button>
       {dlg.open ? (
         <Modal
-          title={`İade al · ${r.contract_no}`}
-          wide
-          submitLabel="İadeyi tamamla"
-          submitClass="success"
+          title="Araç atama"
           onClose={dlg.hide}
-          onSubmit={async () => {
-            await api('POST', `/api/rentals/${r.id}/checkin`, collect());
-            toast('İade tamamlandı');
+          submitLabel="Ata"
+          onSubmit={async (d) => {
+            await api('POST', `/api/reservations/${reservationId}/assignment`, { vehicle_id: d.vehicle_id || null });
+            toast(d.vehicle_id ? 'Araç atandı' : 'Atama kaldırıldı');
             router.refresh();
           }}
         >
-          <div ref={formRef} onInput={bump} onChange={bump}>
-            <div className="alert info">
-              {vehicle.plate} · Çıkış: {numf(r.start_km)} km, yakıt {FUEL(r.start_fuel)} · Planlanan dönüş: {dt(r.planned_return_at)}
-              {vehicle.km_limit_per_day ? ` · Km limiti ${vehicle.km_limit_per_day}/gün` : ''}
-            </div>
-            <div className="form-grid">
-              <Field label="İade zamanı" className="c3"><input type="datetime-local" name="actual_return_at" defaultValue={localInput()} /></Field>
-              <Field label="Dönüş km *" className="c3"><input type="number" name="end_km" min={r.start_km} required /></Field>
-              <Field label="Yakıt seviyesi" className="c3"><select name="end_fuel" defaultValue={r.start_fuel}><Options list={FUEL_OPTIONS} /></select></Field>
-              <Field label="İade şubesi" className="c3"><select name="return_branch_id" defaultValue={r.return_branch_id ?? ''}><Options list={branchOpts} empty="—" /></select></Field>
-              <div className="c12 check-row">
-                <label className="check"><input type="checkbox" name="waive_late" /> Geç iade ücretini alma</label>
-                <label className="check"><input type="checkbox" name="waive_km" /> Km aşımını alma</label>
-                <label className="check"><input type="checkbox" name="waive_fuel" /> Yakıt farkını alma</label>
-              </div>
-
-              <div className="form-section">
-                Hasarlar{' '}
-                <button type="button" className="sm" onClick={() => setDamages((x) => [...x, { key: crypto.randomUUID(), description: '', location: '', severity: 'minor', customer_charge: '' }])}>
-                  + Hasar ekle
-                </button>
-              </div>
-              <div className="c12">
-                {damages.map((row) => (
-                  <div className="dyn-row" key={row.key}>
-                    <Field label="Hasar açıklaması"><input data-skip value={row.description} onChange={(e) => updateRow(setDamages, row.key, 'description', e.target.value)} /></Field>
-                    <Field label="Konum"><input data-skip value={row.location} placeholder="Ön tampon" onChange={(e) => updateRow(setDamages, row.key, 'location', e.target.value)} /></Field>
-                    <Field label="Önem">
-                      <select data-skip value={row.severity} onChange={(e) => updateRow(setDamages, row.key, 'severity', e.target.value)}>
-                        <Options list={labelOptions('severity')} />
-                      </select>
-                    </Field>
-                    <Field label="Müşteriye (₺)"><input data-skip type="number" step="0.01" value={row.customer_charge} onChange={(e) => updateRow(setDamages, row.key, 'customer_charge', e.target.value)} /></Field>
-                    <button type="button" className="sm" onClick={() => setDamages((x) => x.filter((y) => y.key !== row.key))} aria-label="Kaldır">×</button>
-                  </div>
-                ))}
-              </div>
-
-              <div className="form-section">
-                Diğer ek ücretler{' '}
-                <button type="button" className="sm" onClick={() => setCharges((x) => [...x, { key: crypto.randomUUID(), type: 'cleaning', description: '', amount: '' }])}>
-                  + Ücret ekle
-                </button>
-              </div>
-              <div className="c12">
-                {charges.map((row) => (
-                  <div className="dyn-row" key={row.key} style={{ gridTemplateColumns: '1fr 2fr 1fr auto' }}>
-                    <Field label="Tip">
-                      <select data-skip value={row.type} onChange={(e) => updateRow(setCharges, row.key, 'type', e.target.value)}>
-                        <Options list={textOptions('chargeType').filter(([k]) => !AUTO_CHARGES.includes(k))} />
-                      </select>
-                    </Field>
-                    <Field label="Açıklama"><input data-skip value={row.description} onChange={(e) => updateRow(setCharges, row.key, 'description', e.target.value)} /></Field>
-                    <Field label="Tutar (₺)"><input data-skip type="number" step="0.01" value={row.amount} onChange={(e) => updateRow(setCharges, row.key, 'amount', e.target.value)} /></Field>
-                    <button type="button" className="sm" onClick={() => setCharges((x) => x.filter((y) => y.key !== row.key))} aria-label="Kaldır">×</button>
-                  </div>
-                ))}
-              </div>
-
-              <div className="form-section">Hesap</div>
-              <div className="c12" id="preview">
-                {preview ? (
-                  <div className="grid grid-2">
-                    <div>
-                      <SumRow label="Kullanılan km" value={`${numf(preview.km_driven)} km`} />
-                      <SumRow
-                        label="Gerçekleşen süre"
-                        value={<>{preview.actual_days} gün {preview.late_days ? <span className="badge danger">+{preview.late_days} gün gecikme</span> : null}</>}
-                      />
-                      {preview.charges.length ? (
-                        preview.charges.map((c, i) => (
-                          <SumRow key={i} label={<>{text('chargeType', c.type)} <span className="muted small">{c.description}</span></>} value={money(c.amount)} />
-                        ))
-                      ) : (
-                        <SumRow className="muted" label="Ek ücret yok" value="" />
-                      )}
-                    </div>
-                    <div>
-                      <SumRow label="Yeni toplam" value={money(preview.new_total)} />
-                      <SumRow label="Ödenen" value={money(preview.paid)} />
-                      <SumRow total label="Kalan bakiye" value={<span className={preview.balance > 0 ? 'danger-text' : ''}>{money(preview.balance)}</span>} />
-                      <SumRow label="Tutulan depozito" value={money(preview.deposit_held)} />
-                    </div>
-                  </div>
-                ) : previewErr ? (
-                  <ErrorBox error={previewErr} />
-                ) : (
-                  <div className="muted">Dönüş km&apos;sini girin, ücretler otomatik hesaplanır.</div>
-                )}
-              </div>
-
-              <div className="form-section">Tahsilat & depozito</div>
-              <Field label="Tahsilat (₺)" className="c3"><input type="number" step="0.01" name="payment_amount" /></Field>
-              <Field label="Yöntem" className="c3"><select name="payment_method" defaultValue="credit_card"><Options list={PAY_METHODS} /></select></Field>
-              <Field label="Depozito" className="c6">
-                <select name="deposit_action" defaultValue="offset">
-                  <Options list={[['return', 'Tamamını iade et'], ['offset', 'Bakiyeye mahsup et, kalanı iade et'], ['none', 'Şimdilik tut']]} />
+          {!opts ? <div className="muted">Yükleniyor…</div> : (
+            <>
+              {!opts.same.length ? <div className="alert warn">{opts.category} grubunda boş araç yok — upgrade önerileri listelendi.</div> : null}
+              <Field label="Araç">
+                <select name="vehicle_id" defaultValue={current ?? ''}>
+                  <option value="">— Atama yok (grup rezervasyonu) —</option>
+                  {opts.same.length ? <optgroup label={`${opts.category} grubu`}>{opts.same.map((v) => <option key={v.id} value={v.id}>{v.plate} · {v.brand} {v.model} · {numf(v.current_km)} km</option>)}</optgroup> : null}
+                  {opts.upgrades.length ? <optgroup label="Upgrade (fiyat değişmez)">{opts.upgrades.map((v) => <option key={v.id} value={v.id}>{v.plate} · {v.brand} {v.model} ({v.category})</option>)}</optgroup> : null}
                 </select>
               </Field>
-              <label className="check c12"><input type="checkbox" name="send_to_maintenance" /> Aracı iade sonrası bakıma/onarıma al</label>
-              <Field label="İade notları" className="c12"><textarea name="checkin_notes" /></Field>
-            </div>
-          </div>
+              {opts.upgrades.length && !opts.same.length ? <div style={{ marginTop: 8 }}><Tag tone="violet">Upgrade önerisi</Tag></div> : null}
+            </>
+          )}
         </Modal>
       ) : null}
     </>
