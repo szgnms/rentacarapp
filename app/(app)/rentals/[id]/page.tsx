@@ -42,7 +42,7 @@ function Photos({ s, title }: { s: SessionDetail; title: string }) {
 
 export default async function RentalPage({ params }: { params: IdParams }) {
   const [{ id }, user] = await Promise.all([params, requireUser()]);
-  const r = orNotFound(() => getRental(Number(id)));
+  const r = await orNotFound(() => getRental(Number(id)));
   const f = r.finance;
   const { status } = r;
   const active = status === 'active';
@@ -132,7 +132,7 @@ export default async function RentalPage({ params }: { params: IdParams }) {
               <dt>Yakıt</dt><dd>{FUEL(r.start_fuel)}{r.end_fuel !== null ? ` → ${FUEL(r.end_fuel)}` : ''}</dd>
               {r.checkout_notes ? <><dt>Teslim notu</dt><dd>{r.checkout_notes}</dd></> : null}
               {r.checkin_notes ? <><dt>İade notu</dt><dd>{r.checkin_notes}</dd></> : null}
-              {r.portal_token ? <><dt>Müşteri portalı</dt><dd><a href={`/portal/${r.portal_token}`} target="_blank" rel="noreferrer">{portalUrl(r.portal_token)}</a></dd></> : null}
+              {r.portal_token ? <><dt>Müşteri portalı</dt><dd><a href={`/portal/${r.portal_token}`} target="_blank" rel="noreferrer">{await portalUrl(r.portal_token)}</a></dd></> : null}
               {r.closed_at ? <><dt>Kapanış</dt><dd>{dt(r.closed_at)}</dd></> : null}
             </dl>
           </div>

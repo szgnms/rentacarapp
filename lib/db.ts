@@ -1,251 +1,303 @@
-import { DatabaseSync, type SQLInputValue } from 'node:sqlite';
+// Veritabanı katmanı (Postgres).
+// - DATABASE_URL tanımlıysa `pg` havuzu (Neon, Vercel Postgres, Supabase, kendi sunucunuz)
+// - yoksa gömülü PGlite (aynı Postgres lehçesi; yerel geliştirme ve testler için, DATA_DIR/pglite)
+// Tüm sorgular asenkron; `tx` içindeki sorgular AsyncLocalStorage ile aynı bağlantıya bağlanır.
+import { AsyncLocalStorage } from 'node:async_hooks';
 import fs from 'node:fs';
 import path from 'node:path';
+import { HttpError } from './core';
 import { hashPassword } from './password';
-import { migrate } from './migrations';
+import { MIGRATIONS } from './schema';
 import type { Settings } from './types';
 
-const SCHEMA = `
-CREATE TABLE IF NOT EXISTS users (
-  id INTEGER PRIMARY KEY AUTOINCREMENT,
-  username TEXT NOT NULL UNIQUE,
-  password_hash TEXT NOT NULL,
-  full_name TEXT NOT NULL,
-  role TEXT NOT NULL DEFAULT 'staff' CHECK (role IN ('admin','staff')),
-  active INTEGER NOT NULL DEFAULT 1,
-  created_at TEXT NOT NULL DEFAULT (datetime('now','localtime'))
-);
+export type Param = string | number | boolean | null | undefined;
 
-CREATE TABLE IF NOT EXISTS sessions (
-  token TEXT PRIMARY KEY,
-  user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
-  expires_at TEXT NOT NULL
-);
+interface QueryResult<T> {
+  rows: T[];
+  rowCount: number;
+}
+interface Executor {
+  query<T>(sql: string, params: Param[]): Promise<QueryResult<T>>;
+}
+interface Driver extends Executor {
+  kind: 'pg' | 'pglite';
+  exec(sql: string): Promise<void>;
+  transaction<T>(fn: (ex: Executor) => Promise<T>): Promise<T>;
+  /** Tek seferlik kilitli iş (migration/bootstrap): sunucusuz ortamda eşzamanlı soğuk başlatmalara karşı. */
+  locked<T>(fn: (ex: Driver) => Promise<T>): Promise<T>;
+  close(): Promise<void>;
+}
 
-CREATE TABLE IF NOT EXISTS settings (
-  key TEXT PRIMARY KEY,
-  value TEXT
-);
+/** Uygulama saat dilimi: tarih/saatler yerel metin olarak saklandığından sunucu ve veritabanı oturumu aynı dilimde çalışır. */
+export const APP_TZ = /^[A-Za-z0-9_+\-/]+$/.test(process.env.APP_TZ ?? '') ? process.env.APP_TZ! : 'Europe/Istanbul';
+if (!process.env.TZ) process.env.TZ = APP_TZ;
 
-CREATE TABLE IF NOT EXISTS branches (
-  id INTEGER PRIMARY KEY AUTOINCREMENT,
-  name TEXT NOT NULL,
-  city TEXT,
-  address TEXT,
-  phone TEXT,
-  active INTEGER NOT NULL DEFAULT 1
-);
+/** Veri klasörü (PGlite veritabanı ve yerel dosya deposu). Vercel'de yalnızca /tmp yazılabilir. */
+export function dataDir(): string {
+  if (process.env.DATA_DIR) return process.env.DATA_DIR;
+  if (process.env.VERCEL) return path.join('/tmp', 'rentacar');
+  return path.join(process.cwd(), 'data');
+}
 
-CREATE TABLE IF NOT EXISTS vehicles (
-  id INTEGER PRIMARY KEY AUTOINCREMENT,
-  plate TEXT NOT NULL UNIQUE,
-  brand TEXT NOT NULL,
-  model TEXT NOT NULL,
-  year INTEGER,
-  category TEXT NOT NULL DEFAULT 'Ekonomi',
-  fuel_type TEXT NOT NULL DEFAULT 'Benzin',
-  transmission TEXT NOT NULL DEFAULT 'Manuel',
-  seats INTEGER DEFAULT 5,
-  color TEXT,
-  vin TEXT,
-  daily_rate REAL NOT NULL DEFAULT 0,
-  deposit_amount REAL NOT NULL DEFAULT 0,
-  current_km INTEGER NOT NULL DEFAULT 0,
-  km_limit_per_day INTEGER NOT NULL DEFAULT 0,
-  extra_km_fee REAL NOT NULL DEFAULT 0,
-  status TEXT NOT NULL DEFAULT 'available'
-    CHECK (status IN ('available','rented','maintenance','out_of_service')),
-  branch_id INTEGER REFERENCES branches(id),
-  insurance_expiry TEXT,
-  kasko_expiry TEXT,
-  inspection_expiry TEXT,
-  next_service_km INTEGER,
-  notes TEXT,
-  created_at TEXT NOT NULL DEFAULT (datetime('now','localtime'))
-);
+// ---------- Sürücüler ----------
 
-CREATE TABLE IF NOT EXISTS customers (
-  id INTEGER PRIMARY KEY AUTOINCREMENT,
-  type TEXT NOT NULL DEFAULT 'individual' CHECK (type IN ('individual','corporate')),
-  first_name TEXT NOT NULL,
-  last_name TEXT NOT NULL,
-  company_name TEXT,
-  tax_office TEXT,
-  tax_no TEXT,
-  national_id TEXT,
-  passport_no TEXT,
-  nationality TEXT DEFAULT 'TR',
-  birth_date TEXT,
-  phone TEXT NOT NULL,
-  email TEXT,
-  address TEXT,
-  license_no TEXT,
-  license_class TEXT,
-  license_date TEXT,
-  blacklisted INTEGER NOT NULL DEFAULT 0,
-  blacklist_reason TEXT,
-  notes TEXT,
-  created_at TEXT NOT NULL DEFAULT (datetime('now','localtime'))
-);
+/** `?` yer tutucularını `$1, $2…` biçimine çevirir (tırnak içindekiler hariç). */
+const placeholderCache = new Map<string, string>();
+export function toPg(sql: string): string {
+  let out = placeholderCache.get(sql);
+  if (out !== undefined) return out;
+  let n = 0;
+  let quoted = false;
+  out = '';
+  for (const ch of sql) {
+    if (ch === "'") quoted = !quoted;
+    out += ch === '?' && !quoted ? `$${++n}` : ch;
+  }
+  placeholderCache.set(sql, out);
+  return out;
+}
 
-CREATE TABLE IF NOT EXISTS extras (
-  id INTEGER PRIMARY KEY AUTOINCREMENT,
-  name TEXT NOT NULL,
-  price_type TEXT NOT NULL DEFAULT 'daily' CHECK (price_type IN ('daily','per_rental')),
-  price REAL NOT NULL DEFAULT 0,
-  max_price REAL,
-  active INTEGER NOT NULL DEFAULT 1
-);
+/** Geçersiz girdi kaynaklı Postgres hataları (ör. tamsayı alana "1.5") istemci hatasıdır. */
+function mapPgError(e: unknown): never {
+  const code = (e as { code?: string }).code;
+  if (code === '22P02' || code === '22003' || code === '22007' || code === '22008') throw new HttpError(400, 'Geçersiz değer');
+  throw e;
+}
 
-CREATE TABLE IF NOT EXISTS reservations (
-  id INTEGER PRIMARY KEY AUTOINCREMENT,
-  code TEXT NOT NULL UNIQUE,
-  customer_id INTEGER NOT NULL REFERENCES customers(id),
-  vehicle_id INTEGER NOT NULL REFERENCES vehicles(id),
-  pickup_branch_id INTEGER REFERENCES branches(id),
-  return_branch_id INTEGER REFERENCES branches(id),
-  pickup_at TEXT NOT NULL,
-  return_at TEXT NOT NULL,
-  days INTEGER NOT NULL,
-  daily_rate REAL NOT NULL,
-  base_amount REAL NOT NULL,
-  long_term_discount REAL NOT NULL DEFAULT 0,
-  extras_amount REAL NOT NULL DEFAULT 0,
-  one_way_fee REAL NOT NULL DEFAULT 0,
-  discount REAL NOT NULL DEFAULT 0,
-  total_amount REAL NOT NULL,
-  deposit_amount REAL NOT NULL DEFAULT 0,
-  status TEXT NOT NULL DEFAULT 'pending'
-    CHECK (status IN ('pending','confirmed','cancelled','no_show','converted')),
-  source TEXT DEFAULT 'Ofis',
-  cancel_reason TEXT,
-  notes TEXT,
-  created_by INTEGER REFERENCES users(id),
-  created_at TEXT NOT NULL DEFAULT (datetime('now','localtime'))
-);
+const norm = (params: Param[]) =>
+  params.map((p) => {
+    // SQLite NaN'ı sessizce eşleşmeyen değer sayıyordu; Postgres sorguyu reddeder → geçersiz istek (sayfalarda 404)
+    if (typeof p === 'number' && !Number.isFinite(p)) throw new HttpError(400, 'Geçersiz sayısal değer');
+    return p === undefined ? null : p;
+  });
 
-CREATE TABLE IF NOT EXISTS reservation_extras (
-  id INTEGER PRIMARY KEY AUTOINCREMENT,
-  reservation_id INTEGER NOT NULL REFERENCES reservations(id) ON DELETE CASCADE,
-  extra_id INTEGER NOT NULL REFERENCES extras(id),
-  name TEXT NOT NULL,
-  quantity INTEGER NOT NULL DEFAULT 1,
-  amount REAL NOT NULL
-);
+async function pgDriver(url: string): Promise<Driver> {
+  const { default: pg } = await import('pg');
+  // COUNT/SUM (int8, numeric) değerleri JS sayısı olarak dönsün
+  pg.types.setTypeParser(20, (v: string) => Number(v));
+  pg.types.setTypeParser(1700, (v: string) => Number(v));
+  const pool = new pg.Pool({ connectionString: url, max: Number(process.env.PG_POOL_MAX || 5), idleTimeoutMillis: 10_000 });
+  pool.on('connect', (c) => void c.query(`SET TIME ZONE '${APP_TZ}'`));
+  type Q = { query: (text: string, values: unknown[]) => Promise<{ rows: unknown[]; rowCount: number | null }> };
+  const wrap = (c: Q): Executor => ({
+    async query<T>(sql: string, params: Param[]) {
+      const r = await c.query(toPg(sql), norm(params)).catch(mapPgError);
+      return { rows: r.rows as T[], rowCount: r.rowCount ?? 0 };
+    },
+  });
+  const base = wrap(pool as unknown as Q);
+  const driver: Driver = {
+    kind: 'pg',
+    query: base.query,
+    async exec(sql) {
+      await pool.query(sql);
+    },
+    async transaction(fn) {
+      const client = await pool.connect();
+      try {
+        await client.query('BEGIN');
+        const r = await fn(wrap(client as unknown as Q));
+        await client.query('COMMIT');
+        return r;
+      } catch (e) {
+        await client.query('ROLLBACK').catch(() => {});
+        throw e;
+      } finally {
+        client.release();
+      }
+    },
+    async locked(fn) {
+      // İşlem kapsamlı kilit: PgBouncer (işlem modu) arkasında da güvenli; tüm iş aynı bağlantı ve işlemde yürür.
+      const client = await pool.connect();
+      try {
+        await client.query('BEGIN');
+        await client.query('SELECT pg_advisory_xact_lock(727274)');
+        const ex = wrap(client as unknown as Q);
+        const scoped: Driver = {
+          ...driver,
+          query: ex.query,
+          exec: async (sql) => void (await client.query(sql)),
+          transaction: (f) => f(ex),
+          locked: (f) => f(scoped),
+        };
+        const r = await fn(scoped);
+        await client.query('COMMIT');
+        return r;
+      } catch (e) {
+        await client.query('ROLLBACK').catch(() => {});
+        throw e;
+      } finally {
+        client.release();
+      }
+    },
+    close: () => pool.end(),
+  };
+  return driver;
+}
 
-CREATE TABLE IF NOT EXISTS rentals (
-  id INTEGER PRIMARY KEY AUTOINCREMENT,
-  contract_no TEXT NOT NULL UNIQUE,
-  reservation_id INTEGER REFERENCES reservations(id),
-  customer_id INTEGER NOT NULL REFERENCES customers(id),
-  vehicle_id INTEGER NOT NULL REFERENCES vehicles(id),
-  pickup_branch_id INTEGER REFERENCES branches(id),
-  return_branch_id INTEGER REFERENCES branches(id),
-  pickup_at TEXT NOT NULL,
-  planned_return_at TEXT NOT NULL,
-  actual_return_at TEXT,
-  start_km INTEGER NOT NULL,
-  end_km INTEGER,
-  start_fuel INTEGER NOT NULL DEFAULT 8,
-  end_fuel INTEGER,
-  days INTEGER NOT NULL,
-  daily_rate REAL NOT NULL,
-  base_amount REAL NOT NULL,
-  long_term_discount REAL NOT NULL DEFAULT 0,
-  extras_amount REAL NOT NULL DEFAULT 0,
-  one_way_fee REAL NOT NULL DEFAULT 0,
-  discount REAL NOT NULL DEFAULT 0,
-  charges_amount REAL NOT NULL DEFAULT 0,
-  total_amount REAL NOT NULL,
-  deposit_amount REAL NOT NULL DEFAULT 0,
-  additional_driver TEXT,
-  status TEXT NOT NULL DEFAULT 'active' CHECK (status IN ('active','completed','cancelled')),
-  checkout_notes TEXT,
-  checkin_notes TEXT,
-  created_by INTEGER REFERENCES users(id),
-  closed_by INTEGER REFERENCES users(id),
-  created_at TEXT NOT NULL DEFAULT (datetime('now','localtime'))
-);
+async function pgliteDriver(dir: string | null): Promise<Driver> {
+  const { PGlite } = await import('@electric-sql/pglite');
+  if (dir) fs.mkdirSync(dir, { recursive: true });
+  const db = new PGlite(dir ?? undefined, { parsers: { 20: (v: string) => Number(v), 1700: (v: string) => Number(v) } });
+  await db.exec(`SET TIME ZONE '${APP_TZ}'`);
+  // PGlite tek oturumludur: işlem sürerken dışarıdan gelen sorgular sıraya alınır.
+  let chain: Promise<unknown> = Promise.resolve();
+  const serial = async <T>(fn: () => Promise<T>): Promise<T> => {
+    const r = chain.then(fn, fn);
+    chain = r.catch(() => {});
+    return r;
+  };
+  const wrap = (c: { query: (s: string, p: unknown[]) => Promise<{ rows: unknown[]; affectedRows?: number }> }): Executor => ({
+    async query<T>(sql: string, params: Param[]) {
+      const r = await c.query(toPg(sql), norm(params)).catch(mapPgError);
+      return { rows: r.rows as T[], rowCount: r.affectedRows ?? r.rows.length };
+    },
+  });
+  const direct = wrap(db);
+  const driver: Driver = {
+    kind: 'pglite',
+    query: (sql, params) => serial(() => direct.query(sql, params)),
+    exec: (sql) => serial(async () => void (await db.exec(sql))),
+    transaction: (fn) => serial(() => db.transaction((t) => fn(wrap(t)))),
+    locked: (fn) => fn(driver),
+    close: () => db.close(),
+  };
+  return driver;
+}
 
-CREATE TABLE IF NOT EXISTS rental_extras (
-  id INTEGER PRIMARY KEY AUTOINCREMENT,
-  rental_id INTEGER NOT NULL REFERENCES rentals(id) ON DELETE CASCADE,
-  extra_id INTEGER NOT NULL REFERENCES extras(id),
-  name TEXT NOT NULL,
-  quantity INTEGER NOT NULL DEFAULT 1,
-  amount REAL NOT NULL
-);
+// ---------- Bağlantı yönetimi ----------
 
-CREATE TABLE IF NOT EXISTS rental_charges (
-  id INTEGER PRIMARY KEY AUTOINCREMENT,
-  rental_id INTEGER NOT NULL REFERENCES rentals(id) ON DELETE CASCADE,
-  type TEXT NOT NULL CHECK (type IN ('late_return','extra_km','fuel','damage','cleaning','traffic_fine','hgs','other')),
-  description TEXT,
-  amount REAL NOT NULL,
-  created_at TEXT NOT NULL DEFAULT (datetime('now','localtime'))
-);
+/** DATABASE_URL (Neon/Supabase/kendi sunucunuz) ya da eski Vercel Postgres entegrasyonunun POSTGRES_URL değişkeni. */
+export const databaseUrl = () => process.env.DATABASE_URL || process.env.POSTGRES_URL || '';
 
-CREATE TABLE IF NOT EXISTS payments (
-  id INTEGER PRIMARY KEY AUTOINCREMENT,
-  customer_id INTEGER NOT NULL REFERENCES customers(id),
-  rental_id INTEGER REFERENCES rentals(id),
-  reservation_id INTEGER REFERENCES reservations(id),
-  type TEXT NOT NULL CHECK (type IN ('payment','refund','deposit_in','deposit_out')),
-  method TEXT NOT NULL DEFAULT 'cash' CHECK (method IN ('cash','credit_card','bank_transfer','deposit')),
-  amount REAL NOT NULL CHECK (amount > 0),
-  paid_at TEXT NOT NULL,
-  description TEXT,
-  created_by INTEGER REFERENCES users(id),
-  created_at TEXT NOT NULL DEFAULT (datetime('now','localtime'))
-);
+const g = globalThis as unknown as { __rentacarDb?: Promise<Driver> };
+const txStore = new AsyncLocalStorage<Executor>();
 
-CREATE TABLE IF NOT EXISTS maintenance (
-  id INTEGER PRIMARY KEY AUTOINCREMENT,
-  vehicle_id INTEGER NOT NULL REFERENCES vehicles(id),
-  type TEXT NOT NULL DEFAULT 'periodic'
-    CHECK (type IN ('periodic','repair','tire','inspection','damage_repair','other')),
-  description TEXT,
-  start_date TEXT NOT NULL,
-  end_date TEXT,
-  km INTEGER,
-  cost REAL NOT NULL DEFAULT 0,
-  vendor TEXT,
-  status TEXT NOT NULL DEFAULT 'scheduled' CHECK (status IN ('scheduled','in_progress','completed','cancelled')),
-  created_at TEXT NOT NULL DEFAULT (datetime('now','localtime'))
-);
+async function connect(target?: string): Promise<Driver> {
+  const url = target && target !== ':memory:' && /^postgres(ql)?:/.test(target) ? target : databaseUrl();
+  const driver =
+    target === ':memory:' ? await pgliteDriver(null) : url ? await pgDriver(url) : await pgliteDriver(path.join(dataDir(), 'pglite'));
+  await driver.locked(async (d) => {
+    await migrate(d);
+    await bootstrap(d);
+  });
+  return driver;
+}
 
-CREATE TABLE IF NOT EXISTS damages (
-  id INTEGER PRIMARY KEY AUTOINCREMENT,
-  vehicle_id INTEGER NOT NULL REFERENCES vehicles(id),
-  rental_id INTEGER REFERENCES rentals(id),
-  reported_at TEXT NOT NULL,
-  location TEXT,
-  description TEXT NOT NULL,
-  severity TEXT NOT NULL DEFAULT 'minor' CHECK (severity IN ('minor','moderate','major')),
-  repair_cost REAL NOT NULL DEFAULT 0,
-  customer_charge REAL NOT NULL DEFAULT 0,
-  insurance_claim INTEGER NOT NULL DEFAULT 0,
-  status TEXT NOT NULL DEFAULT 'open' CHECK (status IN ('open','repaired','closed')),
-  created_at TEXT NOT NULL DEFAULT (datetime('now','localtime'))
-);
+/**
+ * Veritabanını açar (veya yeniden açar). ':memory:' → bellek içi PGlite (testler),
+ * 'postgres://…' → o sunucu; boş → DATABASE_URL ya da DATA_DIR/pglite.
+ */
+export async function openDb(target?: string): Promise<void> {
+  const prev = g.__rentacarDb;
+  g.__rentacarDb = connect(target);
+  await g.__rentacarDb;
+  if (prev) await prev.then((d) => d.close()).catch(() => {});
+}
 
-CREATE TABLE IF NOT EXISTS expenses (
-  id INTEGER PRIMARY KEY AUTOINCREMENT,
-  vehicle_id INTEGER REFERENCES vehicles(id),
-  category TEXT NOT NULL,
-  amount REAL NOT NULL CHECK (amount >= 0),
-  expense_date TEXT NOT NULL,
-  description TEXT,
-  created_by INTEGER REFERENCES users(id),
-  created_at TEXT NOT NULL DEFAULT (datetime('now','localtime'))
-);
+export async function getDb(): Promise<Driver> {
+  return (g.__rentacarDb ??= connect());
+}
 
-CREATE INDEX IF NOT EXISTS idx_res_vehicle ON reservations(vehicle_id, status);
-CREATE INDEX IF NOT EXISTS idx_rent_vehicle ON rentals(vehicle_id, status);
-CREATE INDEX IF NOT EXISTS idx_pay_rental ON payments(rental_id);
-CREATE INDEX IF NOT EXISTS idx_pay_customer ON payments(customer_id);
-`;
+export async function closeDb() {
+  const d = g.__rentacarDb;
+  g.__rentacarDb = undefined;
+  if (d) await (await d).close();
+}
 
+async function executor(): Promise<Executor> {
+  return txStore.getStore() ?? (await getDb());
+}
+
+export async function all<T>(sql: string, ...params: Param[]): Promise<T[]> {
+  return (await (await executor()).query<T>(sql, params)).rows;
+}
+
+export async function one<T>(sql: string, ...params: Param[]): Promise<T | undefined> {
+  return (await all<T>(sql, ...params))[0];
+}
+
+export async function run(sql: string, ...params: Param[]): Promise<{ changes: number }> {
+  const r = await (await executor()).query(sql, params);
+  return { changes: r.rowCount };
+}
+
+/** İlk satırın ilk sütunu. */
+export async function scalar<T = number>(sql: string, ...params: Param[]): Promise<T> {
+  const row = await one<Record<string, unknown>>(sql, ...params);
+  return (row ? Object.values(row)[0] : undefined) as T;
+}
+
+/** fn'yi tek işlemde çalıştırır; hata olursa geri alır. İç içe çağrılar dıştaki işleme katılır. */
+export async function tx<T>(fn: () => Promise<T> | T): Promise<T> {
+  if (txStore.getStore()) return fn();
+  const d = await getDb();
+  return d.transaction((ex) => txStore.run(ex, async () => fn()));
+}
+
+/**
+ * Ertelenmiş işler (after/setImmediate) AsyncLocalStorage bağlamını devralır; işlem içinde planlanan bir iş
+ * bitmiş işlemin bağlantısını kullanmasın diye işlem bağlamının dışında çalıştırılır.
+ */
+export function outsideTx<T>(fn: () => T): T {
+  return txStore.exit(fn);
+}
+
+let spSeq = 0;
+/**
+ * Postgres'te işlem içindeki bir hata tüm işlemi iptal eder; satır satır hata yakalanan
+ * toplu işlemlerde (CSV içe aktarma) her satır bir SAVEPOINT içinde çalıştırılır.
+ */
+export async function savepoint<T>(fn: () => Promise<T>): Promise<T> {
+  if (!txStore.getStore()) return fn();
+  const name = `sp_${++spSeq}`;
+  await run(`SAVEPOINT ${name}`);
+  try {
+    const r = await fn();
+    await run(`RELEASE SAVEPOINT ${name}`);
+    return r;
+  } catch (e) {
+    await run(`ROLLBACK TO SAVEPOINT ${name}`);
+    throw e;
+  }
+}
+
+type Row = Record<string, Param>;
+
+export async function insertRow(table: string, data: Row): Promise<number> {
+  const keys = Object.keys(data).filter((k) => data[k] !== undefined);
+  const row = await one<{ id?: number }>(
+    `INSERT INTO ${table} (${keys.join(', ')}) VALUES (${keys.map(() => '?').join(', ')}) RETURNING *`,
+    ...keys.map((k) => data[k]),
+  );
+  return Number(row?.id ?? 0);
+}
+
+export async function updateRow(table: string, id: number, data: Row): Promise<void> {
+  const keys = Object.keys(data).filter((k) => data[k] !== undefined);
+  if (!keys.length) return;
+  await run(`UPDATE ${table} SET ${keys.map((k) => `${k} = ?`).join(', ')} WHERE id = ?`, ...keys.map((k) => data[k]), id);
+}
+
+export async function getSettings(): Promise<Settings> {
+  const s: Settings = { ...DEFAULT_SETTINGS };
+  for (const r of await all<{ key: keyof Settings; value: string }>('SELECT key, value FROM settings')) {
+    if (r.key in s) s[r.key] = r.value ?? '';
+  }
+  return s;
+}
+
+// ---------- Migration & başlangıç verisi ----------
+
+async function migrate(d: Driver) {
+  await d.exec('CREATE TABLE IF NOT EXISTS schema_migrations (version INTEGER PRIMARY KEY, applied_at TEXT NOT NULL)');
+  const done = new Set((await d.query<{ version: number }>('SELECT version FROM schema_migrations', [])).rows.map((r) => r.version));
+  for (const [version, sql] of MIGRATIONS) {
+    if (done.has(version)) continue;
+    // Çok ifadeli metin tek seferde (simple query protocol) çalışır; hem pg hem PGlite bunu tek örtük işlemde uygular.
+    await d.exec(`${sql.replaceAll('__APP_TZ__', APP_TZ)};\nINSERT INTO schema_migrations(version, applied_at) VALUES (${Number(version)}, '${new Date().toISOString()}');`);
+  }
+}
 
 export const DEFAULT_SETTINGS: Settings = {
   company_name: 'Rent A Car',
@@ -303,118 +355,19 @@ export const DEFAULT_SETTINGS: Settings = {
   public_base_url: 'http://localhost:3000',
 };
 
-type Param = SQLInputValue;
-
-const g = globalThis as unknown as { __rentacarDb?: DatabaseSync };
-
-/** Opens (or reopens) the database. Uses DB_FILE or data/rentacar.db. */
-export function openDb(file = process.env.DB_FILE || path.join(process.cwd(), 'data', 'rentacar.db')): DatabaseSync {
-  if (file !== ':memory:') fs.mkdirSync(path.dirname(file), { recursive: true });
-  const db = new DatabaseSync(file);
-  db.exec('PRAGMA foreign_keys = ON;');
-  if (file !== ':memory:') {
-    db.exec('PRAGMA journal_mode = WAL;');
-    db.exec('PRAGMA busy_timeout = 5000;');
+async function bootstrap(d: Driver) {
+  const q = (sql: string, ...p: Param[]) => d.query<Record<string, unknown>>(sql, p);
+  const count = async (table: string) => Number((await q(`SELECT COUNT(*) AS n FROM ${table}`)).rows[0].n);
+  for (const [k, v] of Object.entries(DEFAULT_SETTINGS)) await q('INSERT INTO settings(key, value) VALUES (?, ?) ON CONFLICT (key) DO NOTHING', k, v);
+  if ((await count('users')) === 0) {
+    await q('INSERT INTO users(username, password_hash, full_name, role) VALUES (?,?,?,?)', 'admin', hashPassword(process.env.ADMIN_PASSWORD || 'admin123'), 'Sistem Yöneticisi', 'admin');
   }
-  db.exec(SCHEMA);
-  migrate(db);
-  g.__rentacarDb = db;
-  bootstrap(db);
-  return db;
-}
-
-export function getDb(): DatabaseSync {
-  return g.__rentacarDb ?? openDb();
-}
-
-// node:sqlite satırları null-prototype nesnelerdir; React (Server → Client) ve JSON için düz nesneye çevrilir.
-export function one<T>(sql: string, ...params: Param[]): T | undefined {
-  const row = getDb().prepare(sql).get(...params);
-  return row ? ({ ...row } as T) : undefined;
-}
-
-export function all<T>(sql: string, ...params: Param[]): T[] {
-  return getDb().prepare(sql).all(...params).map((r) => ({ ...r }) as T);
-}
-
-export function run(sql: string, ...params: Param[]) {
-  return getDb().prepare(sql).run(...params);
-}
-
-/** Scalar helper: first column of the first row (or the fallback). */
-export function scalar<T = number>(sql: string, ...params: Param[]): T {
-  const row = getDb().prepare(sql).get(...params) as Record<string, unknown> | undefined;
-  return (row ? Object.values(row)[0] : undefined) as T;
-}
-
-let txDepth = 0;
-/** Runs fn inside a transaction; rolls back on error. Nested calls join the outer transaction. */
-export function tx<T>(fn: () => T): T {
-  if (txDepth > 0) return fn();
-  const db = getDb();
-  db.exec('BEGIN');
-  txDepth++;
-  try {
-    const r = fn();
-    db.exec('COMMIT');
-    return r;
-  } catch (e) {
-    db.exec('ROLLBACK');
-    throw e;
-  } finally {
-    txDepth--;
-  }
-}
-
-type Row = Record<string, Param | undefined>;
-
-export function insertRow(table: string, data: Row): number {
-  const keys = Object.keys(data).filter((k) => data[k] !== undefined);
-  const r = getDb()
-    .prepare(`INSERT INTO ${table} (${keys.join(', ')}) VALUES (${keys.map(() => '?').join(', ')})`)
-    .run(...keys.map((k) => data[k] as Param));
-  return Number(r.lastInsertRowid);
-}
-
-export function updateRow(table: string, id: number, data: Row): void {
-  const keys = Object.keys(data).filter((k) => data[k] !== undefined);
-  if (!keys.length) return;
-  getDb()
-    .prepare(`UPDATE ${table} SET ${keys.map((k) => `${k} = ?`).join(', ')} WHERE id = ?`)
-    .run(...keys.map((k) => data[k] as Param), id);
-}
-
-export function getSettings(): Settings {
-  const s: Settings = { ...DEFAULT_SETTINGS };
-  for (const r of all<{ key: keyof Settings; value: string }>('SELECT key, value FROM settings')) {
-    if (r.key in s) s[r.key] = r.value ?? '';
-  }
-  return s;
-}
-
-function bootstrap(db: DatabaseSync) {
-  const insertSetting = db.prepare('INSERT OR IGNORE INTO settings(key, value) VALUES (?, ?)');
-  for (const [k, v] of Object.entries(DEFAULT_SETTINGS)) insertSetting.run(k, v);
-
-  const count = (sql: string) => (db.prepare(sql).get() as { n: number }).n;
-  if (count('SELECT COUNT(*) AS n FROM users') === 0) {
-    db.prepare('INSERT INTO users(username, password_hash, full_name, role) VALUES (?,?,?,?)').run(
-      'admin',
-      hashPassword(process.env.ADMIN_PASSWORD || 'admin123'),
-      'Sistem Yöneticisi',
-      'admin',
-    );
-  }
-  if (count('SELECT COUNT(*) AS n FROM branches') === 0) {
-    db.prepare('INSERT INTO branches(name, city) VALUES (?, ?)').run('Merkez Ofis', 'İstanbul');
-  }
-  if (count('SELECT COUNT(*) AS n FROM extras') === 0) {
-    const ins = db.prepare('INSERT INTO extras(name, price_type, price, max_price) VALUES (?,?,?,?)');
-    ins.run('Bebek Koltuğu', 'daily', 150, 1500);
-    ins.run('Navigasyon', 'daily', 100, 1000);
-    ins.run('Ek Sürücü', 'per_rental', 500, null);
-    ins.run('Mini Hasar Sigortası', 'daily', 250, null);
-    ins.run('Kar Zinciri', 'per_rental', 300, null);
+  if ((await count('branches')) === 0) await q('INSERT INTO branches(name, city) VALUES (?, ?)', 'Merkez Ofis', 'İstanbul');
+  if ((await count('extras')) === 0) {
+    for (const [name, type, price, max] of [
+      ['Bebek Koltuğu', 'daily', 150, 1500], ['Navigasyon', 'daily', 100, 1000], ['Ek Sürücü', 'per_rental', 500, null],
+      ['Mini Hasar Sigortası', 'daily', 250, null], ['Kar Zinciri', 'per_rental', 300, null],
+    ] as [string, string, number, number | null][]) await q('INSERT INTO extras(name, price_type, price, max_price) VALUES (?,?,?,?)', name, type, price, max);
   }
   // Özel davranışlı ek hizmetler (kodla tanınır)
   const coded: [string, string, string, number][] = [
@@ -424,26 +377,22 @@ function bootstrap(db: DatabaseSync) {
     ['additional_driver', 'Ek sürücü', 'per_rental', 500],
   ];
   for (const [code, name, type, price] of coded) {
-    if (!db.prepare('SELECT 1 FROM extras WHERE code = ?').get(code)) {
-      const existing = db.prepare('SELECT id FROM extras WHERE name = ? AND code IS NULL').get(name === 'Ek sürücü' ? 'Ek Sürücü' : name) as { id: number } | undefined;
-      if (existing) db.prepare('UPDATE extras SET code = ? WHERE id = ?').run(code, existing.id);
-      else db.prepare('INSERT INTO extras(name, price_type, price, code) VALUES (?,?,?,?)').run(name, type, price, code);
-    }
+    if ((await q('SELECT 1 FROM extras WHERE code = ?', code)).rows.length) continue;
+    const existing = (await q('SELECT id FROM extras WHERE name = ? AND code IS NULL', name === 'Ek sürücü' ? 'Ek Sürücü' : name)).rows[0];
+    if (existing) await q('UPDATE extras SET code = ? WHERE id = ?', code, existing.id as number);
+    else await q('INSERT INTO extras(name, price_type, price, code) VALUES (?,?,?,?)', name, type, price, code);
   }
-  if (count('SELECT COUNT(*) AS n FROM channels') === 0) {
-    const ins = db.prepare('INSERT INTO channels(code, name, markup_pct, commission_pct) VALUES (?,?,?,?)');
+  if ((await count('channels')) === 0) {
     for (const [code, name, markup, comm] of [
       ['Ofis', 'Ofis / Şube', 0, 0], ['Telefon', 'Çağrı merkezi', 0, 0], ['Web', 'Web sitesi', -5, 0],
       ['Acente', 'Acente (B2B)', 0, 10], ['Kurumsal', 'Kurumsal sözleşme', -10, 0], ['Marketplace', 'Marketplace', 10, 15],
-    ] as [string, string, number, number][]) ins.run(code, name, markup, comm);
+    ] as [string, string, number, number][]) await q('INSERT INTO channels(code, name, markup_pct, commission_pct) VALUES (?,?,?,?)', code, name, markup, comm);
   }
-  if (count('SELECT COUNT(*) AS n FROM contract_templates') === 0) {
-    const ins = db.prepare('INSERT INTO contract_templates(name, language, body) VALUES (?,?,?)');
-    for (const [lang, name, body] of CONTRACT_TEMPLATES) ins.run(name, lang, body);
+  if ((await count('contract_templates')) === 0) {
+    for (const [lang, name, body] of CONTRACT_TEMPLATES) await q('INSERT INTO contract_templates(name, language, body) VALUES (?,?,?)', name, lang, body);
   }
-  if (count('SELECT COUNT(*) AS n FROM notification_templates') === 0) {
-    const ins = db.prepare('INSERT INTO notification_templates(code, channel, subject, body, marketing) VALUES (?,?,?,?,?)');
-    for (const t of NOTIFICATION_TEMPLATES) ins.run(t[0], t[1], t[2], t[3], t[4] ?? 0);
+  if ((await count('notification_templates')) === 0) {
+    for (const t of NOTIFICATION_TEMPLATES) await q('INSERT INTO notification_templates(code, channel, subject, body, marketing) VALUES (?,?,?,?,?)', t[0], t[1], t[2], t[3], t[4] ?? 0);
   }
 }
 

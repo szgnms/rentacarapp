@@ -15,10 +15,10 @@ export const metadata: Metadata = { title: 'Rezervasyon' };
 
 export default async function ReservationPage({ params }: { params: IdParams }) {
   const [{ id }, user] = await Promise.all([params, requireUser()]);
-  const r = orNotFound(() => getReservation(Number(id)));
+  const r = await orNotFound(() => getReservation(Number(id)));
   const open = r.status === 'pending' || r.status === 'confirmed';
-  const customer = open ? getCustomer(r.customer_id) : null;
-  const cancelFee = open || r.status === 'waitlist' ? policyFee(r, 'cancel') : 0;
+  const customer = open ? await getCustomer(r.customer_id) : null;
+  const cancelFee = open || r.status === 'waitlist' ? await policyFee(r, 'cancel') : 0;
   const canOperate = can(user, 'rentals.operate');
   return (
     <>
@@ -45,7 +45,7 @@ export default async function ReservationPage({ params }: { params: IdParams }) 
             {open ? <Link className="btn" href={`/booking?reservation_id=${r.id}`}>Düzenle</Link> : null}
             {open ? <PaymentButton ctx={{ reservation_id: r.id, balance: r.total_amount - r.finance.paid }}>Ön ödeme al</PaymentButton> : null}
             {open && can(user, 'reservations.cancel') ? (
-              <ActionButton url={`/api/reservations/${r.id}/no-show`} confirm={`Müşteri gelmedi olarak işaretlensin mi? No-show ücreti: ${money(policyFee(r, 'no-show'))}`} success="Gelmedi olarak işaretlendi">Gelmedi</ActionButton>
+              <ActionButton url={`/api/reservations/${r.id}/no-show`} confirm={`Müşteri gelmedi olarak işaretlensin mi? No-show ücreti: ${money(await policyFee(r, 'no-show'))}`} success="Gelmedi olarak işaretlendi">Gelmedi</ActionButton>
             ) : null}
             {(open || r.status === 'waitlist') && can(user, 'reservations.cancel') ? (
               <ActionButton
@@ -79,7 +79,7 @@ export default async function ReservationPage({ params }: { params: IdParams }) 
               <dt>Dönüş</dt><dd>{dt(r.return_at)} · {r.return_branch_name || '—'}</dd>
               <dt>Süre</dt><dd>{r.days} gün</dd>
               <dt>Depozito</dt><dd>{money(r.deposit_amount)}</dd>
-              {r.portal_token ? <><dt>Müşteri portalı</dt><dd><a href={`/portal/${r.portal_token}`} target="_blank" rel="noreferrer">{portalUrl(r.portal_token)}</a></dd></> : null}
+              {r.portal_token ? <><dt>Müşteri portalı</dt><dd><a href={`/portal/${r.portal_token}`} target="_blank" rel="noreferrer">{await portalUrl(r.portal_token)}</a></dd></> : null}
               {r.notes ? <><dt>Notlar</dt><dd>{r.notes}</dd></> : null}
             </dl>
           </div>

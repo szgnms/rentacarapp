@@ -13,7 +13,7 @@ export const metadata: Metadata = { title: 'Ödemeler' };
 export default async function PaymentsPage({ searchParams }: { searchParams: SearchParams }) {
   const [q, user] = await Promise.all([flat(searchParams), requireUser()]);
   const defaults = { from: todayStr().slice(0, 8) + '01', to: todayStr() };
-  const rows = listPayments({ ...defaults, ...q });
+  const rows = await listPayments({ ...defaults, ...q });
   const sum = (t: string) => rows.filter((p) => p.type === t).reduce((a, p) => a + p.amount, 0);
   return (
     <>

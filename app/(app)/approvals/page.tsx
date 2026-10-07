@@ -16,7 +16,7 @@ const HREF: Record<string, string> = { reservation: '/reservations/', rental: '/
 export default async function ApprovalsPage({ searchParams }: { searchParams: SearchParams }) {
   const [q, user] = await Promise.all([flat(searchParams), requireUser()]);
   const status = q.status ?? 'pending';
-  const rows = listApprovals(status || undefined);
+  const rows = await listApprovals(status || undefined);
   const approver = can(user, 'approve');
   return (
     <>

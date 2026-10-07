@@ -30,8 +30,8 @@ const L: Record<Lang, Record<string, string>> = {
   },
 };
 
-function companyLines() {
-  const s = getSettings();
+async function companyLines() {
+  const s = await getSettings();
   return [s.company_name, s.company_address, [s.company_phone, s.company_email].filter(Boolean).join(' · '), s.company_tax_no ? `VKN: ${s.company_tax_no} ${s.company_tax_office}` : '']
     .filter(Boolean);
 }
@@ -40,27 +40,27 @@ async function savePdf(w: PdfWriter, entity: string, entityId: number, name: str
   return saveFile({ kind: 'pdf', entity, entityId, name, mime: 'application/pdf', data: await w.bytes(), meta });
 }
 
-function loadRental(id: number) {
-  const r = one<Rental & { plate: string; pickup_branch: string | null; return_branch: string | null }>(
+async function loadRental(id: number) {
+  const r = await one<Rental & { plate: string; pickup_branch: string | null; return_branch: string | null }>(
     `SELECT r.*, v.plate, pb.name AS pickup_branch, rb.name AS return_branch FROM rentals r JOIN vehicles v ON v.id = r.vehicle_id
      LEFT JOIN branches pb ON pb.id = r.pickup_branch_id LEFT JOIN branches rb ON rb.id = r.return_branch_id WHERE r.id = ?`, id,
   );
   if (!r) throw new HttpError(404, 'Kiralama bulunamadı');
-  return { r, c: one<Customer>('SELECT * FROM customers WHERE id = ?', r.customer_id)!, v: one<Vehicle>('SELECT * FROM vehicles WHERE id = ?', r.vehicle_id)! };
+  return { r, c: (await one<Customer>('SELECT * FROM customers WHERE id = ?', r.customer_id))!, v: (await one<Vehicle>('SELECT * FROM vehicles WHERE id = ?', r.vehicle_id))! };
 }
 
-function sessionData(rentalId: number, kind: 'checkout' | 'checkin') {
-  const s = one<{ id: number; km: number | null; fuel: number | null; cleanliness: string | null; notes: string | null; completed_at: string | null }>(
+async function sessionData(rentalId: number, kind: 'checkout' | 'checkin') {
+  const s = await one<{ id: number; km: number | null; fuel: number | null; cleanliness: string | null; notes: string | null; completed_at: string | null }>(
     'SELECT * FROM inspection_sessions WHERE rental_id = ? AND kind = ? ORDER BY id DESC LIMIT 1', rentalId, kind,
   );
   if (!s) return null;
   return {
     ...s,
-    photos: all<{ angle: string; file_id: number }>(
+    photos: await all<{ angle: string; file_id: number }>(
       `SELECT p.angle, p.file_id FROM inspection_photos p WHERE p.session_id = ? AND p.id IN (SELECT MAX(id) FROM inspection_photos WHERE session_id = ? GROUP BY angle)`, s.id, s.id,
     ),
-    marks: all<{ x: number; y: number; type: string; severity: string; note: string | null }>('SELECT * FROM damage_marks WHERE session_id = ? AND voided_at IS NULL', s.id),
-    checklist: all<{ item: string; present: number }>('SELECT item, present FROM inspection_checklist WHERE session_id = ?', s.id),
+    marks: await all<{ x: number; y: number; type: string; severity: string; note: string | null }>('SELECT * FROM damage_marks WHERE session_id = ? AND voided_at IS NULL', s.id),
+    checklist: await all<{ item: string; present: number }>('SELECT item, present FROM inspection_checklist WHERE session_id = ?', s.id),
   };
 }
 
@@ -68,7 +68,7 @@ async function photosFor(list: { angle: string; file_id: number }[]) {
   const out: { data: Buffer; mime: string; caption: string }[] = [];
   for (const p of list) {
     try {
-      const { file, data } = readFile(p.file_id);
+      const { file, data } = await readFile(p.file_id);
       if (file.mime === 'image/jpeg' || file.mime === 'image/png') out.push({ data, mime: file.mime, caption: `${angleLabel(p.angle)} · ${file.sha256.slice(0, 10)}` });
     } catch {
       /* dosya okunamadı */
@@ -78,16 +78,16 @@ async function photosFor(list: { angle: string; file_id: number }[]) {
 }
 
 async function signatureBoxes(rentalId: number, purpose: 'checkout' | 'checkin', labels: { lessor: string; lessee: string }, companyName: string) {
-  const sigs = all<{ signer_type: string; signer_name: string; file_id: number; signed_at: string; ip: string | null; signature_hash: string }>(
+  const sigs = await all<{ signer_type: string; signer_name: string; file_id: number; signed_at: string; ip: string | null; signature_hash: string }>(
     'SELECT * FROM signatures WHERE rental_id = ? AND purpose = ? AND id IN (SELECT MAX(id) FROM signatures WHERE rental_id = ? AND purpose = ? GROUP BY signer_type)',
     rentalId, purpose, rentalId, purpose,
   );
-  const box = (type: 'staff' | 'customer', title: string, fallback: string) => {
+  const box = async (type: 'staff' | 'customer', title: string, fallback: string) => {
     const s = sigs.find((x) => x.signer_type === type);
     let image: { data: Buffer; mime: string } | null = null;
     if (s) {
       try {
-        const f = readFile(s.file_id);
+        const f = await readFile(s.file_id);
         image = { data: f.data, mime: f.file.mime };
       } catch {
         image = null;
@@ -95,37 +95,37 @@ async function signatureBoxes(rentalId: number, purpose: 'checkout' | 'checkin',
     }
     return { title, name: s?.signer_name ?? fallback, image, meta: s ? `${dt(s.signed_at)} · IP ${s.ip ?? '-'} · ${s.signature_hash.slice(0, 16)}` : 'İmzasız' };
   };
-  return [box('staff', labels.lessor, companyName), box('customer', labels.lessee, '')];
+  return [await box('staff', labels.lessor, companyName), await box('customer', labels.lessee, '')];
 }
 
-function templateFor(lang: string, templateId: number | null) {
+async function templateFor(lang: string, templateId: number | null) {
   return (
-    (templateId ? one<{ id: number; body: string }>('SELECT id, body FROM contract_templates WHERE id = ?', templateId) : undefined) ??
-    one<{ id: number; body: string }>('SELECT id, body FROM contract_templates WHERE language = ? AND active = 1 ORDER BY version DESC, id DESC LIMIT 1', lang) ??
-    one<{ id: number; body: string }>("SELECT id, body FROM contract_templates WHERE language = 'tr' AND active = 1 ORDER BY version DESC, id DESC LIMIT 1")
+    (templateId ? await one<{ id: number; body: string }>('SELECT id, body FROM contract_templates WHERE id = ?', templateId) : undefined) ??
+    await one<{ id: number; body: string }>('SELECT id, body FROM contract_templates WHERE language = ? AND active = 1 ORDER BY version DESC, id DESC LIMIT 1', lang) ??
+    await one<{ id: number; body: string }>("SELECT id, body FROM contract_templates WHERE language = 'tr' AND active = 1 ORDER BY version DESC, id DESC LIMIT 1")
   );
 }
 
 /** İmzalı kira sözleşmesi + teslim tutanağı. */
 export async function contractPdf(rentalId: number): Promise<StoredFile> {
-  const s = getSettings();
-  const { r, c, v } = loadRental(rentalId);
+  const s = await getSettings();
+  const { r, c, v } = await loadRental(rentalId);
   const lang = (['tr', 'en', 'de', 'ru'].includes(r.language) ? r.language : 'tr') as Lang;
   const t = L[lang];
-  const out = sessionData(rentalId, 'checkout');
-  const tpl = templateFor(lang, r.template_id);
-  if (tpl && !r.template_id) run('UPDATE rentals SET template_id = ? WHERE id = ?', tpl.id, rentalId);
-  const docHash = one<{ document_hash: string }>("SELECT document_hash FROM signatures WHERE rental_id = ? AND purpose = 'checkout' ORDER BY id DESC", rentalId)?.document_hash;
+  const out = await sessionData(rentalId, 'checkout');
+  const tpl = await templateFor(lang, r.template_id);
+  if (tpl && !r.template_id) await run('UPDATE rentals SET template_id = ? WHERE id = ?', tpl.id, rentalId);
+  const docHash = (await one<{ document_hash: string }>("SELECT document_hash FROM signatures WHERE rental_id = ? AND purpose = 'checkout' ORDER BY id DESC", rentalId))?.document_hash;
 
   const w = await PdfWriter.create(`${r.contract_no} · ${s.company_name} · Belge özeti: ${docHash ?? '-'}`);
-  w.header(companyLines(), [t.title, `No: ${r.contract_no}`, `${dt(r.signed_at ?? r.pickup_at)}`]);
+  w.header(await companyLines(), [t.title, `No: ${r.contract_no}`, `${dt(r.signed_at ?? r.pickup_at)}`]);
   w.heading(t.renter, 10.5);
   w.kv([
     ['Ad Soyad / Name', customerName(c)], ['T.C. / Pasaport', c.national_id || c.passport_no || '—'],
     ['Telefon', c.phone], ['E-posta', c.email ?? '—'], ['Ehliyet no / sınıf', `${c.license_no ?? '—'} / ${c.license_class ?? '—'}`],
     ['Ehliyet tarihi', d(c.license_date)], ['Doğum tarihi', d(c.birth_date)], ['Adres', c.address ?? '—'],
   ]);
-  const drivers = all<{ first_name: string; last_name: string; license_no: string | null }>(
+  const drivers = await all<{ first_name: string; last_name: string; license_no: string | null }>(
     'SELECT d.first_name, d.last_name, d.license_no FROM rental_drivers rd JOIN drivers d ON d.id = rd.driver_id WHERE rd.rental_id = ?', rentalId,
   );
   if (drivers.length || r.additional_driver) {
@@ -144,7 +144,7 @@ export async function contractPdf(rentalId: number): Promise<StoredFile> {
   const fees: string[][] = [[`${r.days} gün × ${money(r.daily_rate)}`, money(r.base_amount)]];
   if (r.long_term_discount) fees.push(['Uzun dönem indirimi', `-${money(r.long_term_discount)}`]);
   if (r.channel_markup) fees.push(['Kanal fiyat farkı', money(r.channel_markup)]);
-  for (const x of all<{ name: string; quantity: number; amount: number }>('SELECT * FROM rental_extras WHERE rental_id = ?', rentalId)) {
+  for (const x of await all<{ name: string; quantity: number; amount: number }>('SELECT * FROM rental_extras WHERE rental_id = ?', rentalId)) {
     fees.push([`${x.name}${x.quantity > 1 ? ` ×${x.quantity}` : ''}`, money(x.amount)]);
   }
   if (r.one_way_fee) fees.push(['Tek yön ücreti', money(r.one_way_fee)]);
@@ -156,10 +156,10 @@ export async function contractPdf(rentalId: number): Promise<StoredFile> {
 
   if (out) {
     w.heading(t.inspection, 10.5);
-    const items = equipmentItems().map((e) => e.name);
+    const items = (await equipmentItems()).map((e) => e.name);
     const present = new Set(out.checklist.filter((x) => x.present).map((x) => x.item));
     w.text(`Ekipman: ${items.map((i) => `${present.has(i) ? '☑' : '☐'} ${i}`).join('   ')}`, { size: 8 });
-    const openDamages = all<{ description: string; location: string | null; severity: string }>(
+    const openDamages = await all<{ description: string; location: string | null; severity: string }>(
       "SELECT description, location, severity FROM damages WHERE vehicle_id = ? AND status = 'open' AND (rental_id IS NULL OR rental_id <> ?)", v.id, rentalId,
     );
     const marks = out.marks.map((m) => [`${DAMAGE_TYPES[m.type as keyof typeof DAMAGE_TYPES] ?? m.type}`, `x:${Math.round(m.x)} y:${Math.round(m.y)}`, m.severity, m.note ?? '']);
@@ -193,30 +193,30 @@ export async function contractPdf(rentalId: number): Promise<StoredFile> {
 
 /** İade tutanağı ve hesap özeti. */
 export async function settlementPdf(rentalId: number): Promise<StoredFile> {
-  const s = getSettings();
-  const { r, c, v } = loadRental(rentalId);
-  const back = sessionData(rentalId, 'checkin');
-  const out = sessionData(rentalId, 'checkout');
+  const s = await getSettings();
+  const { r, c, v } = await loadRental(rentalId);
+  const back = await sessionData(rentalId, 'checkin');
+  const out = await sessionData(rentalId, 'checkout');
   const w = await PdfWriter.create(`${r.contract_no} · İade tutanağı`);
-  w.header(companyLines(), ['İADE TUTANAĞI / HESAP ÖZETİ', `Sözleşme: ${r.contract_no}`, dt(r.actual_return_at)]);
+  w.header(await companyLines(), ['İADE TUTANAĞI / HESAP ÖZETİ', `Sözleşme: ${r.contract_no}`, dt(r.actual_return_at)]);
   w.kv([
     ['Kiracı', customerName(c)], ['Araç', `${v.plate} · ${v.brand} ${v.model}`],
     ['Teslim', dt(r.pickup_at)], ['İade', `${dt(r.actual_return_at)} · ${r.return_branch ?? ''}`],
     ['Km', `${numf(r.start_km)} → ${numf(r.end_km)} (${numf((r.end_km ?? 0) - r.start_km)} km)`], ['Yakıt', `${FUEL(r.start_fuel)} → ${FUEL(r.end_fuel)}`],
     ['Temizlik', back?.cleanliness ? CLEANLINESS_LABELS[back.cleanliness as keyof typeof CLEANLINESS_LABELS] : '—'],
-    ['Ekipman', back ? equipmentItems().filter((e) => out?.checklist.find((x) => x.item === e.name && x.present) && !back.checklist.find((x) => x.item === e.name && x.present)).map((e) => e.name).join(', ') || 'Eksiksiz' : '—'],
+    ['Ekipman', back ? (await equipmentItems()).filter((e) => out?.checklist.find((x) => x.item === e.name && x.present) && !back.checklist.find((x) => x.item === e.name && x.present)).map((e) => e.name).join(', ') || 'Eksiksiz' : '—'],
   ]);
-  const charges = all<RentalCharge>('SELECT * FROM rental_charges WHERE rental_id = ? ORDER BY id', rentalId);
+  const charges = await all<RentalCharge>('SELECT * FROM rental_charges WHERE rental_id = ? ORDER BY id', rentalId);
   const rows: string[][] = [['Kira bedeli ve ek hizmetler', money(r.total_amount - r.charges_amount)]];
   for (const ch of charges) rows.push([`${text('chargeType', ch.type)}${ch.description ? ' — ' + ch.description : ''}`, money(ch.amount)]);
-  const pays = all<{ type: string; total: number }>("SELECT type, SUM(amount) total FROM payments WHERE rental_id = ? GROUP BY type", rentalId);
+  const pays = await all<{ type: string; total: number }>("SELECT type, SUM(amount) total FROM payments WHERE rental_id = ? GROUP BY type", rentalId);
   const sum = (t: string) => pays.find((p) => p.type === t)?.total ?? 0;
   const paid = sum('payment') - sum('refund');
   rows.push(['TOPLAM', money(r.total_amount)], ['Ödenen', money(paid)], ['Kalan bakiye', money(r.total_amount - paid)]);
   w.heading('Hesap özeti', 10.5);
   w.table(['Kalem', 'Tutar'], rows, [4, 1], { totalRows: 3 });
   w.text(`Depozito/provizyon: alınan ${money(sum('deposit_in'))}, iade/mahsup ${money(sum('deposit_out'))}${r.deposit_hold_amount ? `, tutulan ${money(r.deposit_hold_amount)} (${d(r.deposit_hold_until)} tarihine kadar, bekleyen HGS/ceza için)` : ''}`, { size: 8.5 });
-  const newDamages = all<{ description: string; severity: string; customer_charge: number }>('SELECT * FROM damages WHERE rental_id = ?', rentalId);
+  const newDamages = await all<{ description: string; severity: string; customer_charge: number }>('SELECT * FROM damages WHERE rental_id = ?', rentalId);
   if (newDamages.length) {
     w.heading('Yeni tespit edilen hasarlar', 10.5);
     w.table(['Hasar', 'Önem', 'Müşteriye'], newDamages.map((x) => [x.description, x.severity, money(x.customer_charge)]), [4, 1, 1]);
@@ -233,15 +233,15 @@ export async function settlementPdf(rentalId: number): Promise<StoredFile> {
 
 /** e-Arşiv fatura görünümü. */
 export async function invoicePdf(invoiceId: number): Promise<StoredFile> {
-  const s = getSettings();
-  const inv = one<{ id: number; invoice_no: string; type: string; issue_date: string; subtotal: number; vat_rate: number; vat_amount: number; total: number; customer_id: number; rental_id: number | null; e_archive_uuid: string | null; notes: string | null }>(
+  const s = await getSettings();
+  const inv = await one<{ id: number; invoice_no: string; type: string; issue_date: string; subtotal: number; vat_rate: number; vat_amount: number; total: number; customer_id: number; rental_id: number | null; e_archive_uuid: string | null; notes: string | null }>(
     'SELECT * FROM invoices WHERE id = ?', invoiceId,
   );
   if (!inv) throw new HttpError(404, 'Fatura bulunamadı');
-  const c = one<Customer>('SELECT * FROM customers WHERE id = ?', inv.customer_id)!;
-  const lines = all<{ description: string; quantity: number; unit_price: number; amount: number }>('SELECT * FROM invoice_lines WHERE invoice_id = ?', invoiceId);
+  const c = (await one<Customer>('SELECT * FROM customers WHERE id = ?', inv.customer_id))!;
+  const lines = await all<{ description: string; quantity: number; unit_price: number; amount: number }>('SELECT * FROM invoice_lines WHERE invoice_id = ?', invoiceId);
   const w = await PdfWriter.create(`${inv.invoice_no} · e-Arşiv Fatura (entegratör bağlantısı yapılana kadar önizleme)`);
-  w.header(companyLines(), [inv.type === 'return' ? 'e-ARŞİV İADE FATURASI' : 'e-ARŞİV FATURA', `No: ${inv.invoice_no}`, `Tarih: ${d(inv.issue_date)}`, `ETTN: ${inv.e_archive_uuid ?? '(gönderilmedi)'}`]);
+  w.header(await companyLines(), [inv.type === 'return' ? 'e-ARŞİV İADE FATURASI' : 'e-ARŞİV FATURA', `No: ${inv.invoice_no}`, `Tarih: ${d(inv.issue_date)}`, `ETTN: ${inv.e_archive_uuid ?? '(gönderilmedi)'}`]);
   w.heading('Alıcı', 10.5);
   w.kv([
     ['Unvan / Ad Soyad', c.invoice_title || customerName(c)], ['VKN / TCKN', c.tax_no || c.national_id || c.passport_no || '—'],
@@ -266,13 +266,13 @@ export async function invoicePdf(invoiceId: number): Promise<StoredFile> {
 
 /** KABİS bildirim çıktısı (sözleşme dosyasına delil olarak eklenir). */
 export async function kabisPdf(submissionId: number): Promise<StoredFile> {
-  const k = one<{ id: number; rental_id: number; kind: string; status: string; reference_no: string | null; payload: string; created_at: string; sent_at: string | null }>(
+  const k = await one<{ id: number; rental_id: number; kind: string; status: string; reference_no: string | null; payload: string; created_at: string; sent_at: string | null }>(
     'SELECT * FROM kabis_submissions WHERE id = ?', submissionId,
   );
   if (!k) throw new HttpError(404, 'Bildirim bulunamadı');
   const p = JSON.parse(k.payload);
   const w = await PdfWriter.create('KABİS bildirim çıktısı');
-  w.header(companyLines(), ['KABİS BİLDİRİMİ', k.kind === 'open' ? 'Kiralama başlangıcı' : 'Kiralama bitişi', `Durum: ${k.status}`, `Referans: ${k.reference_no ?? '-'}`]);
+  w.header(await companyLines(), ['KABİS BİLDİRİMİ', k.kind === 'open' ? 'Kiralama başlangıcı' : 'Kiralama bitişi', `Durum: ${k.status}`, `Referans: ${k.reference_no ?? '-'}`]);
   w.kv([
     ['Sözleşme no', p.sozlesme_no], ['Plaka', p.arac?.plaka], ['Araç', `${p.arac?.marka} ${p.arac?.model}`], ['Şasi no', p.arac?.sasi_no ?? '—'],
     ['Kiracı', `${p.kiraci?.ad} ${p.kiraci?.soyad}`], ['T.C. / Pasaport', p.kiraci?.tc_kimlik_no || p.kiraci?.pasaport_no || '—'],
@@ -285,14 +285,14 @@ export async function kabisPdf(submissionId: number): Promise<StoredFile> {
 
 /** Trafik cezası — kabahatliye bildirim / sürücüye devir yazısı. */
 export async function fineLetterPdf(fineId: number): Promise<StoredFile> {
-  const s = getSettings();
-  const f = one<{ id: number; plate: string; fine_no: string | null; violation_at: string; type: string; location: string | null; amount: number; rental_id: number | null; customer_id: number | null }>(
+  const s = await getSettings();
+  const f = await one<{ id: number; plate: string; fine_no: string | null; violation_at: string; type: string; location: string | null; amount: number; rental_id: number | null; customer_id: number | null }>(
     'SELECT * FROM traffic_fines WHERE id = ?', fineId,
   );
   if (!f || !f.rental_id || !f.customer_id) throw new HttpError(409, 'Ceza bir sözleşmeyle eşleşmemiş');
-  const { r, c, v } = loadRental(f.rental_id);
+  const { r, c, v } = await loadRental(f.rental_id);
   const w = await PdfWriter.create('Sürücü devir yazısı');
-  w.header(companyLines(), ['KABAHATLİYE BİLDİRİM', `Tarih: ${d(new Date().toISOString())}`]);
+  w.header(await companyLines(), ['KABAHATLİYE BİLDİRİM', `Tarih: ${d(new Date().toISOString())}`]);
   w.text('İlgili Makama,', { gap: 6 });
   w.text(
     `${f.fine_no ? f.fine_no + ' sayılı ' : ''}${dt(f.violation_at)} tarihli ${f.location ? f.location + ' konumunda tespit edilen ' : ''}${money(f.amount)} tutarındaki trafik idari para cezasına konu ${v.plate} plakalı araç, ` +

@@ -50,7 +50,7 @@ export type TaskRow = Task & {
   replacement_plate: string | null;
 };
 
-export function listTasks(f: { status?: string; type?: string; assigned_to?: string; mine?: string; date?: string } = {}, user?: SessionUser): TaskRow[] {
+export function listTasks(f: { status?: string; type?: string; assigned_to?: string; mine?: string; date?: string } = {}, user?: SessionUser): Promise<TaskRow[]> {
   const where: string[] = [];
   const params: (string | number)[] = [];
   if (f.status === 'open_all') where.push("t.status IN ('open','in_progress')");
@@ -73,12 +73,12 @@ export function listTasks(f: { status?: string; type?: string; assigned_to?: str
   );
 }
 
-function taskData(b: Body) {
+async function taskData(b: Body) {
   required(b, [['type', 'Tip']]);
   const type = oneOf(b.type, Object.keys(TASK_TYPES), 'Tip');
   let vehicleId = optId(b.vehicle_id);
   const rentalId = optId(b.rental_id);
-  if (rentalId && !vehicleId) vehicleId = mustGet<Rental>('rentals', rentalId, 'Sözleşme').vehicle_id;
+  if (rentalId && !vehicleId) vehicleId = (await mustGet<Rental>('rentals', rentalId, 'Sözleşme')).vehicle_id;
   return {
     type,
     title: str(b.title) ?? TASK_TYPES[type],
@@ -96,40 +96,40 @@ function taskData(b: Body) {
   };
 }
 
-export function saveTask(id: number | null, b: Body, user: SessionUser | null): Task {
+export async function saveTask(id: number | null, b: Body, user: SessionUser | null): Promise<Task> {
   if (id) {
-    const old = mustGet<Task>('tasks', id, 'İş emri');
-    updateRow('tasks', id, { ...taskData({ ...old, ...b }), status: oneOf(b.status ?? old.status, TASK_STATUS, 'Durum') });
-  } else id = insertRow('tasks', { ...taskData(b), created_by: user?.id ?? null });
-  audit('task.save', 'task', id, { type: b.type, status: b.status });
+    const old = await mustGet<Task>('tasks', id, 'İş emri');
+    await updateRow('tasks', id, { ...await taskData({ ...old, ...b }), status: oneOf(b.status ?? old.status, TASK_STATUS, 'Durum') });
+  } else id = await insertRow('tasks', { ...await taskData(b), created_by: user?.id ?? null });
+  await audit('task.save', 'task', id, { type: b.type, status: b.status });
   return mustGet<Task>('tasks', id);
 }
 
 /** Durum ilerletme; ikame araç iş emri tamamlanınca sözleşmedeki araç değiştirilir. */
-export function setTaskStatus(id: number, status: unknown, b: Body, user: SessionUser): Task {
-  const t = mustGet<Task>('tasks', id, 'İş emri');
+export async function setTaskStatus(id: number, status: unknown, b: Body, user: SessionUser): Promise<Task> {
+  const t = await mustGet<Task>('tasks', id, 'İş emri');
   const s = oneOf(status, TASK_STATUS, 'Durum');
-  tx(() => {
+  await tx(async () => {
     if (s === 'done' && t.type === 'replacement' && t.rental_id && t.replacement_vehicle_id && t.status !== 'done') {
-      swapVehicle(t.rental_id, { vehicle_id: t.replacement_vehicle_id, reason: t.notes ?? 'İkame araç', old_vehicle_km: b.old_vehicle_km, old_vehicle_status: b.old_vehicle_status }, user);
+      await swapVehicle(t.rental_id, { vehicle_id: t.replacement_vehicle_id, reason: t.notes ?? 'İkame araç', old_vehicle_km: b.old_vehicle_km, old_vehicle_status: b.old_vehicle_status }, user);
     }
-    updateRow('tasks', id, { status: s, completed_at: s === 'done' ? nowLocal() : null, cost: str(b.cost) === null ? t.cost : round2(num(b.cost)) });
+    await updateRow('tasks', id, { status: s, completed_at: s === 'done' ? nowLocal() : null, cost: str(b.cost) === null ? t.cost : round2(num(b.cost)) });
     if (s === 'done' && (b.cost || t.cost) && ['roadside', 'wash', 'detailing'].includes(t.type)) {
-      insertRow('expenses', {
+      await insertRow('expenses', {
         vehicle_id: t.vehicle_id, category: t.type === 'roadside' ? 'Çekici / yol yardım' : 'Yıkama/Temizlik',
         amount: round2(num(b.cost, t.cost)), expense_date: nowLocal().slice(0, 10), description: `İş emri #${id}: ${t.title}`, created_by: user.id,
       });
     }
   });
-  audit('task.status', 'task', id, { from: t.status, to: s });
+  await audit('task.status', 'task', id, { from: t.status, to: s });
   return mustGet<Task>('tasks', id);
 }
 
-export const openTaskCount = () => one<{ n: number }>("SELECT COUNT(*) n FROM tasks WHERE status IN ('open','in_progress')")?.n ?? 0;
+export const openTaskCount = async () => (await one<{ n: number }>("SELECT COUNT(*) n FROM tasks WHERE status IN ('open','in_progress')"))?.n ?? 0;
 
-export function deleteTask(id: number) {
-  const t = mustGet<Task>('tasks', id, 'İş emri');
+export async function deleteTask(id: number) {
+  const t = await mustGet<Task>('tasks', id, 'İş emri');
   if (t.status === 'done') throw new HttpError(409, 'Tamamlanmış iş emri silinemez');
-  updateRow('tasks', id, { status: 'cancelled' });
+  await updateRow('tasks', id, { status: 'cancelled' });
   return { ok: true };
 }

@@ -6,21 +6,23 @@ CRM & KVKK, sözleşme yaşam döngüsü, HGS/OGS, trafik cezaları, finans (e-A
 bildirim motoru, KABİS, operasyon iş emirleri, raporlama/BI ve rol bazlı yetkilendirme.
 
 - **Çatı:** Next.js 16 (App Router) + React 19 + TypeScript (strict)
-- **Veritabanı:** SQLite — Node'un yerleşik `node:sqlite` modülü; sürümlü migration'lar (`lib/migrations.ts`)
+- **Veritabanı:** PostgreSQL — `DATABASE_URL` ile `pg` (Neon, Vercel Postgres, Supabase…); tanımlı değilse gömülü **PGlite**
+  (aynı Postgres lehçesi, sunucu kurulumu gerekmez; yerel geliştirme ve testler). Sürümlü migration'lar `lib/schema.ts`
 - **Belgeler:** `pdf-lib` + DejaVu fontları ile Türkçe karakterli PDF (sözleşme, iade tutanağı, fatura, KABİS formu, ceza devir yazısı)
-- **Dosyalar:** WORM dosya deposu — her dosyanın SHA-256 özeti saklanır, dosyalar silinmez yalnızca geçersiz kılınır
+- **Dosyalar:** WORM dosya deposu — her dosyanın SHA-256 özeti saklanır, dosyalar silinmez yalnızca geçersiz kılınır.
+  `BLOB_READ_WRITE_TOKEN` varsa **Vercel Blob (private)**, yoksa yerel disk
 - **Mimari:** Sayfalar Server Component olarak veriyi doğrudan domain katmanından (`lib/domain/*`) okur;
   işlemler Client Component'lerden `app/api/*` route handler'larına gider. Her istek kullanıcı/IP/cihaz bağlamıyla denetim izine yazılır.
 
 ## Gereksinimler
 
-- **Node.js 22.13+** (`node:sqlite` bayraksız; Node 24 LTS önerilir) ve npm
+- **Node.js 22.13+** (Node 24 LTS önerilir) ve npm
 
 ## Yerelde çalıştırma
 
 ```bash
 npm install
-npm run seed     # (opsiyonel) demo verisi — mevcut veritabanını ve yüklenen dosyaları SIFIRLAR
+npm run seed     # (opsiyonel) demo verisi — yerel veritabanını (data/pglite) ve dosyaları SIFIRLAR
 npm run dev      # geliştirme: http://localhost:3000
 ```
 
@@ -43,17 +45,45 @@ Boş veritabanında yalnızca `admin` oluşturulur (şifre `ADMIN_PASSWORD` veya
 | Ortam değişkeni | Açıklama | Varsayılan |
 |---|---|---|
 | `PORT` | HTTP portu | `3000` |
-| `DB_FILE` | SQLite dosya yolu | `data/rentacar.db` |
-| `UPLOAD_DIR` | Fotoğraf/PDF deposu | `DB_FILE` klasörü altında `uploads/` |
+| `DATABASE_URL` | Postgres bağlantısı (`postgres://…?sslmode=require`). Yoksa gömülü PGlite | — |
+| `DATA_DIR` | PGlite veritabanı ve yerel dosya deposu klasörü | `data/` (Vercel'de `/tmp/rentacar`) |
+| `BLOB_READ_WRITE_TOKEN` | Vercel Blob deposu (fotoğraf, imza, PDF) | — (yerel disk) |
+| `BLOB_ACCESS` | Blob erişim türü; depo *private* oluşturulmalı. Public depo kullanılıyorsa `public` | `private` |
+| `UPLOAD_DIR` | Yerel dosya deposu klasörü | `DATA_DIR/uploads` |
+| `APP_TZ` | Uygulama saat dilimi (tarih/saatler yerel saat olarak tutulur) | `Europe/Istanbul` |
+| `CRON_SECRET` | Vercel Cron → `/api/cron` doğrulaması | — |
+| `PG_POOL_MAX` | Postgres havuz boyutu | `5` |
 | `ADMIN_PASSWORD` | Boş veritabanında `admin` şifresi | `admin123` |
 | `COOKIE_SECURE` | `1` ise oturum çerezi yalnızca HTTPS ile | — |
 
 | Komut | Açıklama |
 |---|---|
 | `npm run dev` / `npm run build` / `npm start` | Geliştirme / üretim |
-| `npm test` | Domain testleri (bellek içi veritabanı; teslim→iade→HGS→ceza→fatura akışları) |
+| `npm test` | Domain testleri (bellek içi PGlite Postgres; teslim→iade→HGS→ceza→fatura akışları) |
+| `TEST_DATABASE_URL=postgres://… npm test` | Aynı testler gerçek Postgres sunucusunda (`pg` sürücüsü; **şemayı sıfırlar**) |
 | `npm run typecheck` | TypeScript kontrolü |
-| `npm run seed` | Demo verisi |
+| `npm run seed` | Demo verisi (uzak Postgres için `-- --force`) |
+
+## Vercel'e dağıtım (Postgres + Blob)
+
+1. Vercel projesinde **Storage** sekmesinden bir **Postgres** veritabanı (Neon) ve bir **Blob** deposu oluşturup projeye bağlayın.
+   Bağlanınca `DATABASE_URL` (veya `POSTGRES_URL`) ve `BLOB_READ_WRITE_TOKEN` ortam değişkenleri otomatik eklenir.
+2. `CRON_SECRET` ortam değişkenine rastgele uzun bir değer girin (günlük otomasyon: opsiyon iptalleri, hatırlatmalar, NPS, e-posta kuyruğu — `vercel.json`).
+3. **Production Branch** olarak uygulama kodunun bulunduğu dalı seçin (veya PR'ı `main`'e birleştirin) ve yeniden dağıtın.
+4. İlk istekte şema otomatik oluşturulur (eşzamanlı başlatmalara karşı advisory lock) ve yalnızca `admin / admin123` hesabı eklenir —
+   girişten sonra şifreyi değiştirin. Demo verisi için bir kereliğine `DEMO_SEED=1` ile dağıtın ya da yerelden yükleyin:
+   `DATABASE_URL=... npm run seed -- --force` (**veritabanını sıfırlar**).
+
+Notlar:
+- Kişisel veri içeren dosyalar Blob'da **private** saklanır; tarayıcıya doğrudan Blob adresi verilmez, `/api/files/:id` yetki ve
+  bütünlük (SHA-256) kontrolüyle sunar.
+- `DATABASE_URL` tanımlı değilken Vercel'de geçici `/tmp` PGlite kullanılır ve demo verisi yüklenir (yalnızca tanıtım; veriler kalıcı değildir).
+- Vercel Hobby planında cron günde bir kez çalışır; daha sık hatırlatma için Pro planda `vercel.json` zamanlamasını artırın.
+- Saat dilimi `APP_TZ` ile hem Node sürecinde hem veritabanı oturumunda ayarlanır.
+
+| Ortam değişkeni | Açıklama |
+|---|---|
+| `DEMO_SEED` | `1`: boş veritabanına demo verisi yükle; `0`: kapalı (kalıcı DB yokken Vercel'de varsayılan açık) |
 
 ## Modüller
 
@@ -173,7 +203,8 @@ components/
   client/                   # Modal, Toast, Filters, FormButton, ActionButton, ImportButton, PdfButton…
   dialogs/                  # form diyalogları
 lib/
-  db.ts, migrations.ts      # şema, migration'lar, ayarlar
+  db.ts, schema.ts          # Postgres sürücüleri (pg / PGlite), işlemler, migration'lar, ayarlar
+  demo-seed.ts              # demo verisi
   rules.ts                  # fiyat, müsaitlik, müşteri uygunluğu, iade hesabı
   permissions.ts, auth.ts, session.ts, api.ts, context.ts, audit.ts
   files.ts, pdf.ts, documents.ts, inspection.ts, jobs.ts

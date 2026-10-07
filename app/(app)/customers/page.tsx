@@ -9,7 +9,7 @@ import { CustomerButton } from '@/components/dialogs/forms';
 export const metadata: Metadata = { title: 'Müşteriler' };
 
 export default async function CustomersPage({ searchParams }: { searchParams: SearchParams }) {
-  const rows = listCustomers(await flat(searchParams));
+  const rows = await listCustomers(await flat(searchParams));
   return (
     <>
       <PageHead title="Müşteriler" sub="Bireysel ve kurumsal müşteri kayıtları" actions={<CustomerButton className="primary">+ Müşteri ekle</CustomerButton>} />

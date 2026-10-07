@@ -9,7 +9,7 @@ export const MAINT_STATUS = ['scheduled', 'in_progress', 'completed', 'cancelled
 
 export type MaintenanceRow = Maintenance & { plate: string; brand: string; model: string };
 
-export function listMaintenance(f: { status?: string; vehicle_id?: string } = {}): MaintenanceRow[] {
+export function listMaintenance(f: { status?: string; vehicle_id?: string } = {}): Promise<MaintenanceRow[]> {
   const where: string[] = [];
   const params: (string | number)[] = [];
   if (str(f.status)) {
@@ -28,13 +28,13 @@ export function listMaintenance(f: { status?: string; vehicle_id?: string } = {}
 }
 
 /** Devam eden bakım kaydına göre araç durumunu senkronize eder. */
-function syncVehicleStatus(vehicleId: number) {
-  const v = one<{ status: string }>('SELECT status FROM vehicles WHERE id = ?', vehicleId);
+async function syncVehicleStatus(vehicleId: number) {
+  const v = await one<{ status: string }>('SELECT status FROM vehicles WHERE id = ?', vehicleId);
   if (!v || !['available', 'maintenance', 'damaged'].includes(v.status)) return;
-  const open = one("SELECT 1 FROM maintenance WHERE vehicle_id = ? AND status = 'in_progress' LIMIT 1", vehicleId);
+  const open = await one("SELECT 1 FROM maintenance WHERE vehicle_id = ? AND status = 'in_progress' LIMIT 1", vehicleId);
   // Hasarlı araç servise girince "serviste", servis bitince "müsait" olur; açık servis yoksa hasarlı durumu korunur.
-  if (open) run("UPDATE vehicles SET status = 'maintenance' WHERE id = ?", vehicleId);
-  else if (v.status === 'maintenance') run("UPDATE vehicles SET status = 'available' WHERE id = ?", vehicleId);
+  if (open) await run("UPDATE vehicles SET status = 'maintenance' WHERE id = ?", vehicleId);
+  else if (v.status === 'maintenance') await run("UPDATE vehicles SET status = 'available' WHERE id = ?", vehicleId);
 }
 
 function maintData(b: Body) {
@@ -53,44 +53,44 @@ function maintData(b: Body) {
   return d;
 }
 
-function checkInProgress(d: { status: string; vehicle_id: number }) {
+async function checkInProgress(d: { status: string; vehicle_id: number }) {
   if (d.status !== 'in_progress') return;
-  const v = mustGet<Vehicle>('vehicles', d.vehicle_id, 'Araç');
+  const v = await mustGet<Vehicle>('vehicles', d.vehicle_id, 'Araç');
   if (v.status === 'rented') throw new HttpError(409, 'Araç kirada; iade alınmadan bakıma alınamaz');
 }
 
-export function createMaintenance(b: Body): Maintenance {
+export async function createMaintenance(b: Body): Promise<Maintenance> {
   required(b, [['vehicle_id', 'Araç']]);
-  const id = tx(() => {
+  const id = await tx(async () => {
     const d = maintData(b);
-    mustGet('vehicles', d.vehicle_id, 'Araç');
-    checkInProgress(d);
-    const newId = insertRow('maintenance', d);
-    syncVehicleStatus(d.vehicle_id);
+    await mustGet('vehicles', d.vehicle_id, 'Araç');
+    await checkInProgress(d);
+    const newId = await insertRow('maintenance', d);
+    await syncVehicleStatus(d.vehicle_id);
     return newId;
   });
   return mustGet<Maintenance>('maintenance', id);
 }
 
-export function updateMaintenance(id: number, b: Body): Maintenance {
-  tx(() => {
-    const old = mustGet<Maintenance>('maintenance', id, 'Bakım kaydı');
+export async function updateMaintenance(id: number, b: Body): Promise<Maintenance> {
+  await tx(async () => {
+    const old = await mustGet<Maintenance>('maintenance', id, 'Bakım kaydı');
     const d = maintData({ ...old, ...b });
-    if (d.status !== old.status) checkInProgress(d);
+    if (d.status !== old.status) await checkInProgress(d);
     if (d.status === 'completed' && !d.end_date) d.end_date = today();
-    updateRow('maintenance', id, d);
-    syncVehicleStatus(old.vehicle_id);
-    if (d.vehicle_id !== old.vehicle_id) syncVehicleStatus(d.vehicle_id);
-    if (d.status === 'completed' && d.km) run('UPDATE vehicles SET current_km = MAX(current_km, ?) WHERE id = ?', d.km, d.vehicle_id);
+    await updateRow('maintenance', id, d);
+    await syncVehicleStatus(old.vehicle_id);
+    if (d.vehicle_id !== old.vehicle_id) await syncVehicleStatus(d.vehicle_id);
+        if (d.status === 'completed' && d.km) await run('UPDATE vehicles SET current_km = GREATEST(current_km, ?) WHERE id = ?', d.km, d.vehicle_id);
   });
   return mustGet<Maintenance>('maintenance', id);
 }
 
-export function deleteMaintenance(id: number) {
-  const m = mustGet<Maintenance>('maintenance', id, 'Bakım kaydı');
-  tx(() => {
-    run('DELETE FROM maintenance WHERE id = ?', id);
-    syncVehicleStatus(m.vehicle_id);
+export async function deleteMaintenance(id: number) {
+  const m = await mustGet<Maintenance>('maintenance', id, 'Bakım kaydı');
+  await tx(async () => {
+    await run('DELETE FROM maintenance WHERE id = ?', id);
+    await syncVehicleStatus(m.vehicle_id);
   });
   return { ok: true };
 }
@@ -99,7 +99,7 @@ export function deleteMaintenance(id: number) {
 
 export type DamageRow = Damage & { plate: string; brand: string; model: string; contract_no: string | null; customer_name: string | null };
 
-export function listDamages(f: { status?: string; vehicle_id?: string } = {}): DamageRow[] {
+export function listDamages(f: { status?: string; vehicle_id?: string } = {}): Promise<DamageRow[]> {
   const where: string[] = [];
   const params: (string | number)[] = [];
   if (str(f.status)) {
@@ -134,25 +134,25 @@ function damageData(b: Body) {
   };
 }
 
-export function createDamage(b: Body): Damage {
+export async function createDamage(b: Body): Promise<Damage> {
   required(b, [['vehicle_id', 'Araç'], ['description', 'Açıklama']]);
   const d = damageData(b);
-  mustGet('vehicles', d.vehicle_id, 'Araç');
-  if (d.rental_id && mustGet<Rental>('rentals', d.rental_id, 'Kiralama').vehicle_id !== d.vehicle_id) {
+  await mustGet('vehicles', d.vehicle_id, 'Araç');
+  if (d.rental_id && (await mustGet<Rental>('rentals', d.rental_id, 'Kiralama')).vehicle_id !== d.vehicle_id) {
     throw new HttpError(400, 'Kiralama bu araca ait değil');
   }
-  return mustGet<Damage>('damages', insertRow('damages', d));
+  return mustGet<Damage>('damages', await insertRow('damages', d));
 }
 
-export function updateDamage(id: number, b: Body): Damage {
-  const old = mustGet<Damage>('damages', id, 'Hasar kaydı');
-  updateRow('damages', id, damageData({ ...old, ...b }));
+export async function updateDamage(id: number, b: Body): Promise<Damage> {
+  const old = await mustGet<Damage>('damages', id, 'Hasar kaydı');
+  await updateRow('damages', id, damageData({ ...old, ...b }));
   return mustGet<Damage>('damages', id);
 }
 
-export function deleteDamage(id: number) {
-  mustGet('damages', id, 'Hasar kaydı');
-  run('DELETE FROM damages WHERE id = ?', id);
+export async function deleteDamage(id: number) {
+  await mustGet('damages', id, 'Hasar kaydı');
+  await run('DELETE FROM damages WHERE id = ?', id);
   return { ok: true };
 }
 
@@ -165,7 +165,7 @@ export const EXPENSE_CATEGORIES = [
 
 export type ExpenseRow = Expense & { plate: string | null };
 
-export function listExpenses(f: { from?: string; to?: string; category?: string; vehicle_id?: string } = {}): ExpenseRow[] {
+export function listExpenses(f: { from?: string; to?: string; category?: string; vehicle_id?: string } = {}): Promise<ExpenseRow[]> {
   const where: string[] = [];
   const params: (string | number)[] = [];
   if (str(f.from)) {
@@ -201,28 +201,28 @@ function expenseData(b: Body) {
   };
 }
 
-export function createExpense(b: Body, user: SessionUser): Expense {
+export async function createExpense(b: Body, user: SessionUser): Promise<Expense> {
   required(b, [['amount', 'Tutar']]);
-  return mustGet<Expense>('expenses', insertRow('expenses', { ...expenseData(b), created_by: user.id }));
+  return mustGet<Expense>('expenses', await insertRow('expenses', { ...expenseData(b), created_by: user.id }));
 }
 
-export function updateExpense(id: number, b: Body): Expense {
-  const old = mustGet<Expense>('expenses', id, 'Masraf');
-  updateRow('expenses', id, expenseData({ ...old, ...b }));
+export async function updateExpense(id: number, b: Body): Promise<Expense> {
+  const old = await mustGet<Expense>('expenses', id, 'Masraf');
+  await updateRow('expenses', id, expenseData({ ...old, ...b }));
   return mustGet<Expense>('expenses', id);
 }
 
-export function deleteExpense(id: number) {
-  mustGet('expenses', id, 'Masraf');
-  run('DELETE FROM expenses WHERE id = ?', id);
+export async function deleteExpense(id: number) {
+  await mustGet('expenses', id, 'Masraf');
+  await run('DELETE FROM expenses WHERE id = ?', id);
   return { ok: true };
 }
 
-export const totalCosts = (from: string, to: string, vehicleId?: number) =>
+export const totalCosts = async (from: string, to: string, vehicleId?: number) =>
   round2(
-    scalar<number>(`SELECT COALESCE(SUM(amount),0) FROM expenses WHERE expense_date BETWEEN ? AND ?${vehicleId ? ' AND vehicle_id = ?' : ''}`,
+    await scalar<number>(`SELECT COALESCE(SUM(amount),0) FROM expenses WHERE expense_date BETWEEN ? AND ?${vehicleId ? ' AND vehicle_id = ?' : ''}`,
       ...(vehicleId ? [from, to, vehicleId] : [from, to])) +
-      scalar<number>(
+      await scalar<number>(
         `SELECT COALESCE(SUM(cost),0) FROM maintenance WHERE status <> 'cancelled' AND start_date BETWEEN ? AND ?${vehicleId ? ' AND vehicle_id = ?' : ''}`,
         ...(vehicleId ? [from, to, vehicleId] : [from, to]),
       ),

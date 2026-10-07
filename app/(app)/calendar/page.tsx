@@ -18,7 +18,7 @@ function cellClass(ev: CalendarEvent, day: string) {
 
 export default async function CalendarPage({ searchParams }: { searchParams: SearchParams }) {
   const q = await flat(searchParams);
-  const data = calendar(q);
+  const data = await calendar(q);
   const today = todayStr();
   const days = Array.from({ length: data.days }, (_, i) => shiftDate(data.from, i));
   const byVehicle = new Map<number, CalendarEvent[]>();

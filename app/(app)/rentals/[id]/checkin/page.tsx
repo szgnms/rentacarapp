@@ -17,7 +17,7 @@ export const metadata: Metadata = { title: 'Araç iadesi' };
 
 export default async function CheckinPage({ params }: { params: IdParams }) {
   const [{ id }, user] = await Promise.all([params, requirePerm('rentals.operate')]);
-  const r = orNotFound(() => getRental(Number(id)));
+  const r = await orNotFound(() => getRental(Number(id)));
   if (r.status !== 'active') redirect(`/rentals/${r.id}`);
   return (
     <>
@@ -27,7 +27,7 @@ export default async function CheckinPage({ params }: { params: IdParams }) {
         actions={<Link className="btn" href={`/rentals/${r.id}`}>Sözleşme</Link>}
       />
       {r.checkin ? (
-        <CheckinWizard initial={r} equipment={equipmentItems().map((e) => e.name)} branches={listBranches()} canApprove={can(user, 'approve')} holdDays={getSettings().deposit_hold_days} />
+        <CheckinWizard initial={r} equipment={(await equipmentItems()).map((e) => e.name)} branches={await listBranches()} canApprove={can(user, 'approve')} holdDays={(await getSettings()).deposit_hold_days} />
       ) : (
         <div className="card" style={{ maxWidth: 520 }}>
           <div className="card-body">

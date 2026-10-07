@@ -31,11 +31,11 @@ const DRIVER_FIELDS: FieldSpec[] = [
 export default async function CustomerPage({ params }: { params: IdParams }) {
   const [{ id }, user] = await Promise.all([params, requireUser()]);
   // Kişisel veri görüntüleme KVKK erişim loguna yazılır.
-  const c = orNotFound(() => getCustomer(Number(id), { log: true }));
+  const c = await orNotFound(() => getCustomer(Number(id), { log: true }));
   const live = c.rentals.filter((r) => !['cancelled', 'draft'].includes(r.status));
   const write = can(user, 'customers.write') && !c.anonymized_at;
   const pii = can(user, 'customers.pii');
-  const consents = consentState(c.id);
+  const consents = await consentState(c.id);
   return (
     <>
       <PageHead

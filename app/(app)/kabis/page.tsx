@@ -14,8 +14,8 @@ export const metadata: Metadata = { title: 'KABİS bildirimleri' };
 
 export default async function KabisPage({ searchParams }: { searchParams: SearchParams }) {
   const [q] = await Promise.all([flat(searchParams), requirePerm('kabis.manage')]);
-  const rows = listKabis(q);
-  const mode = getSettings().kabis_mode;
+  const rows = await listKabis(q);
+  const mode = (await getSettings()).kabis_mode;
   return (
     <>
       <PageHead

@@ -18,11 +18,11 @@ export const metadata: Metadata = { title: 'Araç teslimi' };
 
 export default async function CheckoutPage({ params }: { params: IdParams }) {
   const [{ id }, user] = await Promise.all([params, requirePerm('rentals.operate')]);
-  const r = orNotFound(() => getRental(Number(id)));
+  const r = await orNotFound(() => getRental(Number(id)));
   if (r.status !== 'draft') redirect(`/rentals/${r.id}`);
   let vehicles: { id: number; label: string; category: string; km: number }[] = [];
   try {
-    vehicles = availableVehicles({ pickup_at: nowLocal(), return_at: r.planned_return_at, exclude_rental_id: r.id, exclude_reservation_id: r.reservation_id ?? 0 })
+    vehicles = (await availableVehicles({ pickup_at: nowLocal(), return_at: r.planned_return_at, exclude_rental_id: r.id, exclude_reservation_id: r.reservation_id ?? 0 }))
       .filter((v) => v.status === 'available')
       .map((v) => ({ id: v.id, label: `${v.plate} · ${v.brand} ${v.model}`, category: v.category, km: v.current_km }));
   } catch {
@@ -44,10 +44,10 @@ export default async function CheckoutPage({ params }: { params: IdParams }) {
       />
       <CheckoutWizard
         initial={r}
-        equipment={equipmentItems().map((e) => e.name)}
+        equipment={(await equipmentItems()).map((e) => e.name)}
         vehicles={vehicles}
-        drivers={all('SELECT id, first_name, last_name, license_no FROM drivers WHERE customer_id = ? ORDER BY id', r.customer_id)}
-        documents={listFiles('customer', r.customer_id)}
+        drivers={await all('SELECT id, first_name, last_name, license_no FROM drivers WHERE customer_id = ? ORDER BY id', r.customer_id)}
+        documents={await listFiles('customer', r.customer_id)}
         staffName={user.full_name}
       />
     </>

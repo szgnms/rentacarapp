@@ -1,5 +1,5 @@
 // HGS/OGS geçişleri ve trafik cezaları: içe aktarma, sözleşmeyle eşleştirme, istisna kuyruğu, müşteriye yansıtma.
-import { all, getSettings, insertRow, one, run, tx, updateRow } from '../db';
+import { all, getSettings, insertRow, one, run, savepoint, tx, updateRow } from '../db';
 import { HttpError, addDays, fmtDate, fmtDateTime, mustGet, normDateTime, nowLocal, num, oneOf, optId, parseDate, required, round2, str, today } from '../core';
 import { recalcRental } from '../rules';
 import { audit } from '../audit';
@@ -52,22 +52,22 @@ export function parseTrDateTime(s: string): string | null {
 const parseAmount = (s: string) => num(String(s).replace(/[^\d,.-]/g, '').replace(/\.(?=\d{3}(\D|$))/g, '').replace(',', '.'), NaN);
 const normPlate = (p: string) => p.toLocaleUpperCase('tr-TR').replace(/\s+/g, '');
 
-function findVehicle(plate: string, tag?: string): Vehicle | undefined {
+async function findVehicle(plate: string, tag?: string): Promise<Vehicle | undefined> {
   if (tag) {
-    const v = one<Vehicle>('SELECT * FROM vehicles WHERE hgs_tag_no = ?', tag);
+    const v = await one<Vehicle>('SELECT * FROM vehicles WHERE hgs_tag_no = ?', tag);
     if (v) return v;
   }
-  return plate ? one<Vehicle>("SELECT * FROM vehicles WHERE REPLACE(UPPER(plate), ' ', '') = ?", normPlate(plate)) : undefined;
+  return plate ? await one<Vehicle>("SELECT * FROM vehicles WHERE REPLACE(UPPER(plate), ' ', '') = ?", normPlate(plate)) : undefined;
 }
 
 /** Olay zamanında aracı kullanan sözleşme (teslim ≤ t ≤ iade). */
-export function rentalAt(vehicleId: number, at: string): Rental | undefined {
-  return one<Rental>(
+export async function rentalAt(vehicleId: number, at: string): Promise<Rental | undefined> {
+  return await one<Rental>(
     `SELECT * FROM rentals WHERE vehicle_id = ? AND status IN ('active','returned','closed') AND pickup_at <= ?
-       AND COALESCE(actual_return_at, MAX(planned_return_at, ?)) >= ? ORDER BY pickup_at DESC LIMIT 1`,
+       AND COALESCE(actual_return_at, GREATEST(planned_return_at, ?)) >= ? ORDER BY pickup_at DESC LIMIT 1`,
     vehicleId, at, nowLocal(), at,
   ) ?? // ikame araç değişikliklerinde eski araçla yapılan geçişler
-    one<Rental>(
+    await one<Rental>(
       `SELECT r.* FROM rental_vehicle_changes c JOIN rentals r ON r.id = c.rental_id
        WHERE c.old_vehicle_id = ? AND r.pickup_at <= ? AND c.changed_at >= ? LIMIT 1`, vehicleId, at, at,
     );
@@ -94,11 +94,11 @@ export interface Toll {
 
 export type TollRow = Toll & { contract_no: string | null; customer_name: string | null };
 
-export function listTolls(f: { status?: string; q?: string; from?: string; to?: string } = {}): TollRow[] {
+export function listTolls(f: { status?: string; q?: string; from?: string; to?: string } = {}): Promise<TollRow[]> {
   const where: string[] = [];
   const params: (string | number)[] = [];
   if (str(f.status)) { where.push('t.status = ?'); params.push(str(f.status)!); }
-  if (str(f.q)) { where.push('(t.plate LIKE ? OR t.location LIKE ? OR r.contract_no LIKE ?)'); params.push(...Array(3).fill(`%${str(f.q)}%`)); }
+  if (str(f.q)) { where.push('(t.plate ILIKE ? OR t.location ILIKE ? OR r.contract_no ILIKE ?)'); params.push(...Array(3).fill(`%${str(f.q)}%`)); }
   if (str(f.from)) { where.push('t.passed_at >= ?'); params.push(str(f.from)!); }
   if (str(f.to)) { where.push('t.passed_at <= ?'); params.push(str(f.to) + 'T23:59'); }
   return all<TollRow>(
@@ -109,16 +109,16 @@ export function listTolls(f: { status?: string; q?: string; from?: string; to?: 
   );
 }
 
-function chargeToll(t: Toll, rental: Rental, userId: number | null) {
-  const fee = num(getSettings().hgs_service_fee);
-  const chargeId = insertRow('rental_charges', {
+async function chargeToll(t: Toll, rental: Rental, userId: number | null) {
+  const fee = num((await getSettings()).hgs_service_fee);
+  const chargeId = await insertRow('rental_charges', {
     rental_id: rental.id, type: 'hgs', amount: round2(t.amount + fee), toll_id: t.id, created_by: userId,
     description: `${dt(t.passed_at)} ${t.location ?? ''} (${money(t.amount)} + hizmet ${money(fee)})`.trim(),
     post_charge: rental.status === 'returned' || rental.status === 'closed' ? 1 : 0,
   });
-  updateRow('toll_transactions', t.id, { status: 'charged', rental_id: rental.id, charge_id: chargeId, service_fee: fee });
-  recalcRental(rental.id);
-  notifyRental('hgs_notice', rental.id, { vars: { amount: money(t.amount + fee) }, dedupeKey: `hgs:${t.id}` });
+  await updateRow('toll_transactions', t.id, { status: 'charged', rental_id: rental.id, charge_id: chargeId, service_fee: fee });
+  await recalcRental(rental.id);
+  await notifyRental('hgs_notice', rental.id, { vars: { amount: money(t.amount + fee) }, dedupeKey: `hgs:${t.id}` });
 }
 
 export interface ImportResult {
@@ -130,13 +130,13 @@ export interface ImportResult {
 }
 
 /** Banka/PTT/sağlayıcı ekstresi CSV'si: plaka;tarih;gise;tutar (başlık isimleri esnek). */
-export function importTolls(csv: string, user: SessionUser): ImportResult {
+export async function importTolls(csv: string, user: SessionUser): Promise<ImportResult> {
   const rows = parseCsv(csv);
   if (!rows.length) throw new HttpError(400, 'CSV boş veya başlık satırı yok');
   const res: ImportResult = { imported: 0, duplicates: 0, matched: 0, unmatched: 0, errors: [] };
   const batch = `HGS-${fmtDateTime(new Date())}`;
-  tx(() => {
-    rows.forEach((row, i) => {
+  await tx(async () => {
+    for (const [i, row] of rows.entries()) {
       const plate = pick(row, ['plaka', 'plate']);
       const tag = pick(row, ['etiket', 'etiketno', 'tag', 'hgs', 'ogs']);
       const passed = parseTrDateTime(pick(row, ['tarih', 'tarihsaat', 'gecistarihi', 'date', 'datetime', 'passed_at']));
@@ -144,55 +144,56 @@ export function importTolls(csv: string, user: SessionUser): ImportResult {
       const location = pick(row, ['gise', 'gişe', 'giseadi', 'yer', 'istasyon', 'location']) || null;
       if (!passed || !Number.isFinite(amount) || (!plate && !tag)) {
         res.errors.push(`Satır ${i + 2}: plaka/etiket, tarih ve tutar zorunlu`);
-        return;
+        continue;
       }
-      const vehicle = findVehicle(plate, tag);
-      const r = run(
-        `INSERT OR IGNORE INTO toll_transactions(vehicle_id, plate, tag_no, passed_at, location, amount, batch) VALUES (?,?,?,?,?,?,?)`,
+      const vehicle = await findVehicle(plate, tag);
+      const r = await one<{ id: number }>(
+        `INSERT INTO toll_transactions(vehicle_id, plate, tag_no, passed_at, location, amount, batch) VALUES (?,?,?,?,?,?,?)
+         ON CONFLICT (plate, passed_at, location, amount) DO NOTHING RETURNING id`,
         vehicle?.id ?? null, vehicle?.plate ?? plate.toLocaleUpperCase('tr-TR'), tag || vehicle?.hgs_tag_no || null, passed, location, round2(amount), batch,
       );
-      if (!r.changes) {
+      if (!r) {
         res.duplicates++;
-        return;
+        continue;
       }
       res.imported++;
-      const toll = one<Toll>('SELECT * FROM toll_transactions WHERE id = ?', Number(r.lastInsertRowid))!;
-      if (vehicle) run('UPDATE vehicles SET hgs_balance = hgs_balance - ? WHERE id = ?', toll.amount, vehicle.id);
-      const rental = vehicle ? rentalAt(vehicle.id, passed) : undefined;
+      const toll = (await one<Toll>('SELECT * FROM toll_transactions WHERE id = ?', r.id))!;
+      if (vehicle) await run('UPDATE vehicles SET hgs_balance = hgs_balance - ? WHERE id = ?', toll.amount, vehicle.id);
+      const rental = vehicle ? await rentalAt(vehicle.id, passed) : undefined;
       if (rental) {
-        chargeToll(toll, rental, user.id);
+        await chargeToll(toll, rental, user.id);
         res.matched++;
       } else res.unmatched++;
-    });
+    }
   });
-  audit('toll.import', 'toll', null, { ...res, errors: res.errors.length });
+  await audit('toll.import', 'toll', null, { ...res, errors: res.errors.length });
   return res;
 }
 
 /** İstisna kuyruğu: elle sözleşmeye bağla / şirket gideri / itiraz. */
-export function resolveToll(id: number, action: 'assign' | 'company' | 'dispute', b: Body, user: SessionUser): Toll {
-  const t = mustGet<Toll>('toll_transactions', id, 'Geçiş');
+export async function resolveToll(id: number, action: 'assign' | 'company' | 'dispute', b: Body, user: SessionUser): Promise<Toll> {
+  const t = await mustGet<Toll>('toll_transactions', id, 'Geçiş');
   if (t.status === 'charged' && action !== 'dispute') throw new HttpError(409, 'Geçiş zaten müşteriye yansıtılmış');
-  tx(() => {
+  await tx(async () => {
     if (action === 'assign') {
-      const rental = mustGet<Rental>('rentals', num(b.rental_id), 'Sözleşme');
-      chargeToll(t, rental, user.id);
+      const rental = await mustGet<Rental>('rentals', num(b.rental_id), 'Sözleşme');
+      await chargeToll(t, rental, user.id);
     } else if (action === 'company') {
-      updateRow('toll_transactions', id, { status: 'company', note: str(b.note) });
-      insertRow('expenses', { vehicle_id: t.vehicle_id, category: 'HGS yükleme', amount: t.amount, expense_date: t.passed_at.slice(0, 10), description: `Şirket kullanımı geçiş: ${t.location ?? ''}`, created_by: user.id });
-    } else updateRow('toll_transactions', id, { status: 'disputed', note: str(b.note) });
-    audit(`toll.${action}`, 'toll', id, { rental_id: b.rental_id });
+      await updateRow('toll_transactions', id, { status: 'company', note: str(b.note) });
+      await insertRow('expenses', { vehicle_id: t.vehicle_id, category: 'HGS yükleme', amount: t.amount, expense_date: t.passed_at.slice(0, 10), description: `Şirket kullanımı geçiş: ${t.location ?? ''}`, created_by: user.id });
+    } else await updateRow('toll_transactions', id, { status: 'disputed', note: str(b.note) });
+    await audit(`toll.${action}`, 'toll', id, { rental_id: b.rental_id });
   });
   return mustGet<Toll>('toll_transactions', id);
 }
 
 /** Sözleşme bulunamayan geçişleri yeniden eşleştirmeyi dener (geç gelen kayıtlar için). */
-export function rematchTolls(user: SessionUser) {
+export async function rematchTolls(user: SessionUser) {
   let n = 0;
-  for (const t of all<Toll>("SELECT * FROM toll_transactions WHERE status = 'unmatched' AND vehicle_id IS NOT NULL")) {
-    const r = rentalAt(t.vehicle_id!, t.passed_at);
+  for (const t of await all<Toll>("SELECT * FROM toll_transactions WHERE status = 'unmatched' AND vehicle_id IS NOT NULL")) {
+    const r = await rentalAt(t.vehicle_id!, t.passed_at);
     if (r) {
-      tx(() => chargeToll(t, r, user.id));
+      await tx(() => chargeToll(t, r, user.id));
       n++;
     }
   }
@@ -242,30 +243,30 @@ function fineWarning(f: Fine): string | null {
   return null;
 }
 
-export function listFines(f: { status?: string; q?: string } = {}): FineRow[] {
+export async function listFines(f: { status?: string; q?: string } = {}): Promise<FineRow[]> {
   const where: string[] = [];
   const params: (string | number)[] = [];
   if (str(f.status)) { where.push('f.status = ?'); params.push(str(f.status)!); }
-  if (str(f.q)) { where.push('(f.plate LIKE ? OR f.fine_no LIKE ? OR r.contract_no LIKE ?)'); params.push(...Array(3).fill(`%${str(f.q)}%`)); }
-  const limitDays = num(getSettings().fine_limitation_days, 730);
-  return all<Fine & { contract_no: string | null; customer_name: string | null }>(
+  if (str(f.q)) { where.push('(f.plate ILIKE ? OR f.fine_no ILIKE ? OR r.contract_no ILIKE ?)'); params.push(...Array(3).fill(`%${str(f.q)}%`)); }
+  const limitDays = num((await getSettings()).fine_limitation_days, 730);
+  return (await all<Fine & { contract_no: string | null; customer_name: string | null }>(
     `SELECT f.*, r.contract_no, c.first_name || ' ' || c.last_name AS customer_name FROM traffic_fines f
      LEFT JOIN rentals r ON r.id = f.rental_id LEFT JOIN customers c ON c.id = f.customer_id
      ${where.length ? 'WHERE ' + where.join(' AND ') : ''} ORDER BY f.violation_at DESC LIMIT 1000`,
     ...params,
-  ).map((x) => ({ ...x, limitation_date: fmtDate(addDays(parseDate(x.violation_at)!, limitDays)), warning: fineWarning(x) }));
+  )).map((x) => ({ ...x, limitation_date: fmtDate(addDays(parseDate(x.violation_at)!, limitDays)), warning: fineWarning(x) }));
 }
 
-function matchFine(id: number) {
-  const f = mustGet<Fine>('traffic_fines', id);
+async function matchFine(id: number) {
+  const f = await mustGet<Fine>('traffic_fines', id);
   if (!f.vehicle_id) return;
-  const r = rentalAt(f.vehicle_id, f.violation_at);
-  if (r) updateRow('traffic_fines', id, { rental_id: r.id, customer_id: r.customer_id, status: f.status === 'new' ? 'matched' : f.status });
+  const r = await rentalAt(f.vehicle_id, f.violation_at);
+  if (r) await updateRow('traffic_fines', id, { rental_id: r.id, customer_id: r.customer_id, status: f.status === 'new' ? 'matched' : f.status });
 }
 
-function fineData(b: Body) {
+async function fineData(b: Body) {
   required(b, [['plate', 'Plaka'], ['violation_at', 'İhlal tarihi'], ['amount', 'Tutar']]);
-  const vehicle = findVehicle(String(b.plate));
+  const vehicle = await findVehicle(String(b.plate));
   const notified = str(b.notified_at) ? normDateTime(b.notified_at, 'Tebliğ tarihi').slice(0, 10) : null;
   return {
     vehicle_id: vehicle?.id ?? null,
@@ -276,77 +277,81 @@ function fineData(b: Body) {
     location: str(b.location),
     amount: round2(num(b.amount)),
     notified_at: notified,
-    discount_deadline: notified ? fmtDate(addDays(parseDate(notified)!, num(getSettings().fine_discount_days, 15))) : null,
+    discount_deadline: notified ? fmtDate(addDays(parseDate(notified)!, num((await getSettings()).fine_discount_days, 15))) : null,
     file_id: optId(b.file_id),
     notes: str(b.notes),
   };
 }
 
-export function createFine(b: Body, user: SessionUser): FineRow {
-  const id = insertRow('traffic_fines', { ...fineData(b), created_by: user.id });
-  matchFine(id);
-  audit('fine.create', 'fine', id);
-  return listFines().find((x) => x.id === id)!;
+export async function createFine(b: Body, user: SessionUser): Promise<FineRow> {
+  const id = await insertRow('traffic_fines', { ...await fineData(b), created_by: user.id });
+  await matchFine(id);
+  await audit('fine.create', 'fine', id);
+  return (await listFines()).find((x) => x.id === id)!;
 }
 
-export function importFines(csv: string, user: SessionUser): ImportResult {
+export async function importFines(csv: string, user: SessionUser): Promise<ImportResult> {
   const rows = parseCsv(csv);
   if (!rows.length) throw new HttpError(400, 'CSV boş veya başlık satırı yok');
   const res: ImportResult = { imported: 0, duplicates: 0, matched: 0, unmatched: 0, errors: [] };
-  tx(() => {
-    rows.forEach((row, i) => {
+  await tx(async () => {
+    for (const [i, row] of rows.entries()) {
       try {
-        const body = {
-          plate: pick(row, ['plaka', 'plate']), violation_at: pick(row, ['tarih', 'cezatarihi', 'ihlaltarihi', 'date']),
-          amount: parseAmount(pick(row, ['tutar', 'ceza', 'amount'])), fine_no: pick(row, ['cezano', 'tutanakno', 'no', 'fine_no']) || null,
-          location: pick(row, ['yer', 'konum', 'location']) || null, notified_at: pick(row, ['teblig', 'tebligtarihi', 'notified_at']) || null,
-          type: pick(row, ['tip', 'type']) || 'other',
-        };
-        const parsedNotified = body.notified_at ? parseTrDateTime(body.notified_at) : null;
-        if (body.fine_no && one('SELECT 1 FROM traffic_fines WHERE fine_no = ?', body.fine_no)) {
-          res.duplicates++;
-          return;
-        }
-        const id = insertRow('traffic_fines', { ...fineData({ ...body, notified_at: parsedNotified, type: FINE_TYPES[body.type] ? body.type : 'other' }), created_by: user.id });
-        matchFine(id);
-        res.imported++;
-        if (one('SELECT 1 FROM traffic_fines WHERE id = ? AND rental_id IS NOT NULL', id)) res.matched++;
-        else res.unmatched++;
+        // Satır hatası tüm işlemi iptal etmesin (Postgres): her satır kendi SAVEPOINT'inde
+        await savepoint(async () => {
+          const body = {
+            plate: pick(row, ['plaka', 'plate']), violation_at: pick(row, ['tarih', 'cezatarihi', 'ihlaltarihi', 'date']),
+            amount: parseAmount(pick(row, ['tutar', 'ceza', 'amount'])), fine_no: pick(row, ['cezano', 'tutanakno', 'no', 'fine_no']) || null,
+            location: pick(row, ['yer', 'konum', 'location']) || null, notified_at: pick(row, ['teblig', 'tebligtarihi', 'notified_at']) || null,
+            type: pick(row, ['tip', 'type']) || 'other',
+          };
+          const parsedNotified = body.notified_at ? parseTrDateTime(body.notified_at) : null;
+          if (body.fine_no && (await one('SELECT 1 FROM traffic_fines WHERE fine_no = ?', body.fine_no))) {
+            res.duplicates++;
+            return;
+          }
+          const data = await fineData({ ...body, notified_at: parsedNotified, type: FINE_TYPES[body.type] ? body.type : 'other' });
+          const id = await insertRow('traffic_fines', { ...data, created_by: user.id });
+          await matchFine(id);
+          res.imported++;
+          if (await one('SELECT 1 FROM traffic_fines WHERE id = ? AND rental_id IS NOT NULL', id)) res.matched++;
+          else res.unmatched++;
+        });
       } catch (e) {
         res.errors.push(`Satır ${i + 2}: ${(e as Error).message}`);
       }
-    });
+    }
   });
-  audit('fine.import', 'fine', null, { ...res, errors: res.errors.length });
+  await audit('fine.import', 'fine', null, { ...res, errors: res.errors.length });
   return res;
 }
 
 export async function fineAction(id: number, action: string, b: Body, user: SessionUser): Promise<Fine> {
-  const f = mustGet<Fine>('traffic_fines', id, 'Ceza');
+  const f = await mustGet<Fine>('traffic_fines', id, 'Ceza');
   switch (action) {
     case 'assign': {
-      const r = mustGet<Rental>('rentals', num(b.rental_id), 'Sözleşme');
-      updateRow('traffic_fines', id, { rental_id: r.id, customer_id: r.customer_id, status: f.status === 'new' ? 'matched' : f.status });
+      const r = await mustGet<Rental>('rentals', num(b.rental_id), 'Sözleşme');
+      await updateRow('traffic_fines', id, { rental_id: r.id, customer_id: r.customer_id, status: f.status === 'new' ? 'matched' : f.status });
       break;
     }
     case 'charge': {
       if (!f.rental_id) throw new HttpError(409, 'Ceza bir sözleşmeyle eşleşmemiş');
       if (f.charge_id) throw new HttpError(409, 'Ceza zaten yansıtılmış');
-      const r = mustGet<Rental>('rentals', f.rental_id);
-      const fee = str(b.service_fee) === null ? num(getSettings().fine_service_fee) : num(b.service_fee);
-      tx(() => {
-        const chargeId = insertRow('rental_charges', {
+      const r = await mustGet<Rental>('rentals', f.rental_id);
+      const fee = str(b.service_fee) === null ? num((await getSettings()).fine_service_fee) : num(b.service_fee);
+      await tx(async () => {
+        const chargeId = await insertRow('rental_charges', {
           rental_id: r.id, type: 'traffic_fine', amount: round2(f.amount + fee), fine_id: id, created_by: user.id,
           description: `${FINE_TYPES[f.type] ?? f.type} ${dt(f.violation_at)}${f.fine_no ? ' #' + f.fine_no : ''} (${money(f.amount)} + hizmet ${money(fee)})`,
           post_charge: r.status === 'returned' || r.status === 'closed' ? 1 : 0,
         });
-        updateRow('traffic_fines', id, { status: 'charged', charge_id: chargeId, service_fee: fee });
-        recalcRental(r.id);
+        await updateRow('traffic_fines', id, { status: 'charged', charge_id: chargeId, service_fee: fee });
+        await recalcRental(r.id);
       });
-      const customer = one<Customer>('SELECT * FROM customers WHERE id = ?', r.customer_id)!;
-      sendTemplate('fine_notice', {
+      const customer = (await one<Customer>('SELECT * FROM customers WHERE id = ?', r.customer_id))!;
+      await sendTemplate('fine_notice', {
         customer, entity: 'fine', entityId: id, dedupeKey: `fine:${id}`,
-        vars: { plate: f.plate, contract_no: r.contract_no, violation_at: dt(f.violation_at), amount: money(f.amount + fee), portal_url: portalUrl(r.portal_token) },
+        vars: { plate: f.plate, contract_no: r.contract_no, violation_at: dt(f.violation_at), amount: money(f.amount + fee), portal_url: await portalUrl(r.portal_token) },
       });
       break;
     }
@@ -354,40 +359,40 @@ export async function fineAction(id: number, action: string, b: Body, user: Sess
       // Sürücüye devir (kabahatliye bildirim) yazısı
       const { fineLetterPdf } = await import('../documents');
       const pdf = await fineLetterPdf(id);
-      updateRow('traffic_fines', id, { status: 'transferred', file_id: f.file_id ?? pdf.id, notes: [f.notes, `Devir yazısı #${pdf.id}`].filter(Boolean).join(' · ') });
+      await updateRow('traffic_fines', id, { status: 'transferred', file_id: f.file_id ?? pdf.id, notes: [f.notes, `Devir yazısı #${pdf.id}`].filter(Boolean).join(' · ') });
       break;
     }
     case 'pay':
-      updateRow('traffic_fines', id, { status: f.charge_id ? 'closed' : 'paid', paid_amount: num(b.paid_amount, f.amount), paid_at: str(b.paid_at) ?? today() });
+      await updateRow('traffic_fines', id, { status: f.charge_id ? 'closed' : 'paid', paid_amount: num(b.paid_amount, f.amount), paid_at: str(b.paid_at) ?? today() });
       if (!f.charge_id) {
-        insertRow('expenses', { vehicle_id: f.vehicle_id, category: 'Trafik cezası', amount: num(b.paid_amount, f.amount), expense_date: today(), description: `Ceza ${f.fine_no ?? id} şirket ödemesi`, created_by: user.id });
+        await insertRow('expenses', { vehicle_id: f.vehicle_id, category: 'Trafik cezası', amount: num(b.paid_amount, f.amount), expense_date: today(), description: `Ceza ${f.fine_no ?? id} şirket ödemesi`, created_by: user.id });
       }
       break;
     case 'object':
-      updateRow('traffic_fines', id, { status: 'objected', objection_note: str(b.note) });
+      await updateRow('traffic_fines', id, { status: 'objected', objection_note: str(b.note) });
       break;
     case 'close':
-      updateRow('traffic_fines', id, { status: 'closed', notes: [f.notes, str(b.note)].filter(Boolean).join(' · ') });
+      await updateRow('traffic_fines', id, { status: 'closed', notes: [f.notes, str(b.note)].filter(Boolean).join(' · ') });
       break;
     case 'cancel':
       if (f.charge_id) throw new HttpError(409, 'Yansıtılmış ceza önce ücret affı ile geri alınmalı');
-      updateRow('traffic_fines', id, { status: 'cancelled', notes: str(b.note) });
+      await updateRow('traffic_fines', id, { status: 'cancelled', notes: str(b.note) });
       break;
     default:
       throw new HttpError(404, 'Bilinmeyen işlem');
   }
-  audit(`fine.${action}`, 'fine', id, { rental_id: b.rental_id });
+  await audit(`fine.${action}`, 'fine', id, { rental_id: b.rental_id });
   return mustGet<Fine>('traffic_fines', id);
 }
 
 /** HGS/ceza yönetim özeti (gösterge paneli ve raporlar için). */
-export function tollFineSummary() {
+export async function tollFineSummary() {
   return {
-    unmatched_tolls: one<{ n: number }>("SELECT COUNT(*) n FROM toll_transactions WHERE status = 'unmatched'")!.n,
-    open_fines: one<{ n: number }>("SELECT COUNT(*) n FROM traffic_fines WHERE status IN ('new','matched','transferred')")!.n,
-    fine_deadlines: listFines().filter((f) => f.warning).length,
-    low_hgs: all<{ id: number; plate: string; hgs_balance: number }>(
-      "SELECT id, plate, hgs_balance FROM vehicles WHERE hgs_tag_no IS NOT NULL AND status <> 'sold' AND hgs_balance < ?", num(getSettings().hgs_low_balance),
+    unmatched_tolls: (await one<{ n: number }>("SELECT COUNT(*) n FROM toll_transactions WHERE status = 'unmatched'"))!.n,
+    open_fines: (await one<{ n: number }>("SELECT COUNT(*) n FROM traffic_fines WHERE status IN ('new','matched','transferred')"))!.n,
+    fine_deadlines: (await listFines()).filter((f) => f.warning).length,
+    low_hgs: await all<{ id: number; plate: string; hgs_balance: number }>(
+      "SELECT id, plate, hgs_balance FROM vehicles WHERE hgs_tag_no IS NOT NULL AND status <> 'sold' AND hgs_balance < ?", num((await getSettings()).hgs_low_balance),
     ),
   };
 }

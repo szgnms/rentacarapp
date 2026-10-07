@@ -12,13 +12,13 @@ export const dynamic = 'force-dynamic';
 export default async function AppLayout({ children }: { children: React.ReactNode }) {
   const user = await requireUser();
   const badges = {
-    approvals: pendingApprovalCount(),
-    kabis: kabisAlarms(),
-    tasks: openTaskCount(),
-    tolls: tollFineSummary().unmatched_tolls,
+    approvals: await pendingApprovalCount(),
+    kabis: await kabisAlarms(),
+    tasks: await openTaskCount(),
+    tolls: (await tollFineSummary()).unmatched_tolls,
   };
   return (
-    <Shell user={user} company={getSettings().company_name || 'Rent A Car'} permissions={permissionsOf(user.role)} badges={badges}>
+    <Shell user={user} company={(await getSettings()).company_name || 'Rent A Car'} permissions={permissionsOf(user.role)} badges={badges}>
       {children}
     </Shell>
   );

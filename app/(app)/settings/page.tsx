@@ -29,7 +29,7 @@ export default async function SettingsPage({ searchParams }: { searchParams: Sea
     ...(userAdmin ? ([['users', 'Kullanıcılar'], ['roles', 'Rol / yetki matrisi']] as [string, string][]) : []),
     ['account', 'Hesabım'],
   ];
-  const branches = listBranches();
+  const branches = await listBranches();
   const tplFields: FieldSpec[] = [
     { name: 'name', label: 'Şablon adı', required: true, span: 8 },
     { name: 'language', label: 'Dil', type: 'select', options: Object.entries(LANGUAGES), span: 4 },
@@ -42,7 +42,7 @@ export default async function SettingsPage({ searchParams }: { searchParams: Sea
       <PageHead title="Ayarlar" sub={admin ? 'Sistem yapılandırması' : 'Yalnızca yöneticiler ayarları değiştirebilir'} />
       <Tabs items={tabs} active={tab} base="/settings" />
 
-      {tab === 'general' ? <SettingsForm settings={(({ smtp_pass, ...rest }) => ({ ...rest, smtp_pass: smtp_pass ? '***' : '' }))(getSettings())} editable={admin} /> : null}
+      {tab === 'general' ? <SettingsForm settings={(({ smtp_pass, ...rest }) => ({ ...rest, smtp_pass: smtp_pass ? '***' : '' }))(await getSettings())} editable={admin} /> : null}
 
       {tab === 'branches' ? (
         <>
@@ -80,8 +80,8 @@ export default async function SettingsPage({ searchParams }: { searchParams: Sea
         <>
           {admin ? <div className="actions mb"><ExtraButton label="+ Ek hizmet" className="primary" /></div> : null}
           <Card>
-            {(() => {
-              const rows = listExtras();
+            {await (async () => {
+              const rows = await listExtras();
               return (
                 <Table cols={['Hizmet', 'Fiyat tipi', ['Fiyat', 'num'], ['Üst limit', 'num'], 'Durum', '']} count={rows.length}>
                   {rows.map((x) => (
@@ -113,8 +113,8 @@ export default async function SettingsPage({ searchParams }: { searchParams: Sea
           title="Çok dilli sözleşme şablonları (düzenleme yeni versiyon oluşturur; imzalı sözleşmeler kendi versiyonunu korur)"
           actions={admin ? <FormButton title="Yeni şablon" url="/api/contract-templates" fields={tplFields} defaults={{ language: 'tr' }} className="sm primary" wide>+ Şablon</FormButton> : null}
         >
-          {(() => {
-            const rows = listContractTemplates();
+          {await (async () => {
+            const rows = await listContractTemplates();
             return (
               <Table cols={['Şablon', 'Dil', ['Versiyon', 'num'], 'Metin', 'Durum', '']} count={rows.length}>
                 {rows.map((t) => (
@@ -174,8 +174,8 @@ export default async function SettingsPage({ searchParams }: { searchParams: Sea
         <>
           <div className="actions mb"><UserButton label="+ Kullanıcı" className="primary" roles={ROLE_LABELS} branches={branches} /></div>
           <Card>
-            {(() => {
-              const rows = listUsers();
+            {await (async () => {
+              const rows = await listUsers();
               return (
                 <Table cols={['Kullanıcı adı', 'Ad soyad', 'Rol', 'Şube', ['İndirim limiti', 'num'], 'Durum', '']} count={rows.length}>
                   {rows.map((u) => (

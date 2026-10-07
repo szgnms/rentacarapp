@@ -12,7 +12,7 @@ export const metadata: Metadata = { title: 'Raporlar' };
 
 export default async function ReportsPage({ searchParams }: { searchParams: SearchParams }) {
   await requirePerm('reports.view');
-  const r = reports(await flat(searchParams));
+  const r = await reports(await flat(searchParams));
   const k = r.kpis;
   const s = r.summary;
   const t = todayStr();
@@ -100,7 +100,7 @@ export default async function ReportsPage({ searchParams }: { searchParams: Sear
       </div>
       <Card title="Araç bazında performans" className="mb">
         <Table cols={['Araç', 'Kategori', ['Kiralama', 'num'], ['Kiralanan gün', 'num'], 'Doluluk', ['Gelir', 'num'], ['Gider', 'num'], ['Katkı', 'num']]} count={r.by_vehicle.length}>
-          {[...r.by_vehicle].sort((a, b) => b.revenue - a.revenue).map((v) => (
+          {([...r.by_vehicle].sort((a, b) => b.revenue - a.revenue)).map((v) => (
             <ClickRow key={v.id} href={`/vehicles/${v.id}`}>
               <td><strong>{v.plate}</strong> <span className="muted small">{v.brand} {v.model}</span></td>
               <td>{v.category}</td>

@@ -1,13 +1,25 @@
 import { one } from './db';
 import type { Body } from './types';
 
+const HTTP_ERROR = Symbol.for('rentacar.HttpError');
+
 export class HttpError extends Error {
   status: number;
   details?: unknown;
+  readonly [HTTP_ERROR] = true;
   constructor(status: number, message: string, details?: unknown) {
     super(message);
+    this.name = 'HttpError';
     this.status = status;
     this.details = details;
+  }
+
+  /**
+   * Marka tabanlı instanceof: sunucu paketleri (instrumentation, RSC, route handler) sınıfın ayrı kopyalarını
+   * içerebilir; globalThis üzerinden paylaşılan veritabanı sürücüsünün fırlattığı hata da tanınsın.
+   */
+  static [Symbol.hasInstance](x: unknown): boolean {
+    return typeof x === 'object' && x !== null && (x as Record<symbol, unknown>)[HTTP_ERROR] === true;
   }
 }
 
@@ -110,9 +122,23 @@ const TABLES = new Set([
   'toll_transactions', 'traffic_fines', 'tasks', 'contract_templates', 'notification_templates', 'kabis_submissions',
 ]);
 
-export function mustGet<T>(table: string, id: number, label = 'Kayıt'): T {
+export async function mustGet<T>(table: string, id: number, label = 'Kayıt'): Promise<T> {
   if (!TABLES.has(table)) throw new Error(`Bilinmeyen tablo: ${table}`);
-  const row = one<T>(`SELECT * FROM ${table} WHERE id = ?`, id);
+  const row = await one<T>(`SELECT * FROM ${table} WHERE id = ?`, id);
   if (!row) throw new HttpError(404, `${label} bulunamadı`);
   return row;
+}
+
+/** Sıralı async map (işlem içinde tek bağlantıda güvenli; sıra korunur). */
+export async function mapSeq<T, R>(items: readonly T[], fn: (x: T, i: number) => Promise<R> | R): Promise<R[]> {
+  const out: R[] = [];
+  for (let i = 0; i < items.length; i++) out.push(await fn(items[i], i));
+  return out;
+}
+
+/** Sıralı async filtre. */
+export async function filterSeq<T>(items: readonly T[], pred: (x: T) => Promise<boolean> | boolean): Promise<T[]> {
+  const out: T[] = [];
+  for (const x of items) if (await pred(x)) out.push(x);
+  return out;
 }

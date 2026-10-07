@@ -12,7 +12,7 @@ export const metadata: Metadata = { title: 'Kiralamalar' };
 export default async function RentalsPage({ searchParams }: { searchParams: SearchParams }) {
   const q = await flat(searchParams);
   const user = await requireUser();
-  const rows = listRentals({ ...q, status: q.status ?? 'active' }, user);
+  const rows = await listRentals({ ...q, status: q.status ?? 'active' }, user);
   return (
     <>
       <PageHead title="Kiralamalar" sub="Kira sözleşmeleri, teslim ve iade işlemleri" actions={<Link className="btn primary" href="/booking?mode=rental">+ Kapıdan kiralama</Link>} />

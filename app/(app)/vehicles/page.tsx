@@ -14,11 +14,11 @@ export const metadata: Metadata = { title: 'Araçlar' };
 
 export default async function VehiclesPage({ searchParams }: { searchParams: SearchParams }) {
   const [q, user] = await Promise.all([flat(searchParams), requireUser()]);
-  const rows = listVehicles(q, user);
+  const rows = await listVehicles(q, user);
   const expiring = new Map<number, string[]>();
-  for (const x of expiringDocuments(30)) expiring.set(x.vehicle_id, [...(expiring.get(x.vehicle_id) ?? []), DOCUMENT_TYPES[x.type] ?? x.type]);
+  for (const x of await expiringDocuments(30)) expiring.set(x.vehicle_id, [...(expiring.get(x.vehicle_id) ?? []), DOCUMENT_TYPES[x.type] ?? x.type]);
   const counts = rows.reduce<Record<string, number>>((a, v) => ((a[v.status] = (a[v.status] ?? 0) + 1), a), {});
-  const branches = listBranches();
+  const branches = await listBranches();
   return (
     <>
       <PageHead

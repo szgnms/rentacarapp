@@ -4,7 +4,7 @@ import { HttpError, toId } from '@/lib/core';
 import { transitionReservation } from '@/lib/domain/reservations';
 import { startCheckoutFromReservation } from '@/lib/domain/agreements';
 
-export const POST = handler<{ id: string; action: string }>(({ params, body, user }) => {
+export const POST = handler<{ id: string; action: string }>(async ({ params, body, user }) => {
   const id = toId(params.id);
   switch (params.action) {
     case 'confirm':
@@ -16,7 +16,7 @@ export const POST = handler<{ id: string; action: string }>(({ params, body, use
       return transitionReservation(id, params.action, body, user);
     case 'checkout':
       assertCan(user, 'rentals.operate');
-      return created(startCheckoutFromReservation(id, body, user));
+      return created(await startCheckoutFromReservation(id, body, user));
     default:
       throw new HttpError(404, 'Bilinmeyen işlem');
   }

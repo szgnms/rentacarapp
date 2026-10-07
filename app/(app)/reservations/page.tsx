@@ -13,8 +13,8 @@ export const metadata: Metadata = { title: 'Rezervasyonlar' };
 
 export default async function ReservationsPage({ searchParams }: { searchParams: SearchParams }) {
   const [q, user] = await Promise.all([flat(searchParams), requireUser()]);
-  const rows = listReservations(q, user);
-  const channels = listChannels();
+  const rows = await listReservations(q, user);
+  const channels = await listChannels();
   return (
     <>
       <PageHead title="Rezervasyonlar" sub="İleri tarihli araç rezervasyonları" actions={<Link className="btn primary" href="/booking">+ Yeni rezervasyon</Link>} />
